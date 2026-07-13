@@ -1,24 +1,40 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { Stack } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import 'react-native-reanimated';
-
-import { useColorScheme } from '@/hooks/use-color-scheme';
-
-export const unstable_settings = {
-  anchor: '(tabs)',
-};
+import { Slot } from 'expo-router';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { initLocalDatabase } from '../database/db'; // Import our new database helper
 
 export default function RootLayout() {
-  const colorScheme = useColorScheme();
+  const [isDbReady, setIsDbReady] = useState(false);
 
-  return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
-      </Stack>
-      <StatusBar style="auto" />
-    </ThemeProvider>
-  );
+  useEffect(() => {
+    // Initialize SQLite tables synchronously on boot
+    initLocalDatabase();
+    setIsDbReady(true);
+  }, []);
+
+  if (!isDbReady) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#0000ff" />
+        <Text style={styles.text}>Booting POS Database...</Text>
+      </View>
+    );
+  }
+
+  // <Slot /> acts as a placeholder that renders the active screen (which is app/index.tsx)
+  return <Slot />;
 }
+
+const styles = StyleSheet.create({
+  center: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+  text: {
+    marginTop: 10,
+    fontSize: 16,
+    color: '#333',
+  },
+});
