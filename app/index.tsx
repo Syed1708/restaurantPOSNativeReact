@@ -1,9 +1,16 @@
 import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Dimensions, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Dimensions, Platform, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { apiClient } from '../api/client';
 import { showFeedback } from '../components/toastHelper';
-import { getLocalCategories, getLocalProducts, saveMenuToLocalDb } from '../database/db';
+import {
+  getLocalCategories,
+  getLocalProducts,
+  getUnsyncedOrders,
+  markOrdersAsSynced,
+  saveMenuToLocalDb,
+  saveOrderLocally
+} from '../database/db';
 import { AuthContext } from './_layout';
 
 interface UserProfile {
@@ -20,23 +27,26 @@ interface CartItem {
   quantity: number;
 }
 
+const generateUUID = (): string => {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+};
+
 export default function HomeScreen() {
   const auth = useContext(AuthContext);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncingMenu, setSyncingMenu] = useState(false);
+  const [syncingOrders, setSyncingOrders] = useState(false);
 
-  // SQLite data states
   const [sqliteCategories, setSqliteCategories] = useState<any[]>([]);
   const [sqliteProducts, setSqliteProducts] = useState<any[]>([]);
-
-  // Selected state for product grid
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null);
-
-  // Shopping Cart state
   const [cart, setCart] = useState<CartItem[]>([]);
 
-  // 1. Decoupled menu read helper (No dependency on selectedCategoryId)
   const refreshLocalMenuData = useCallback(() => {
     const localCats = getLocalCategories();
     const localProds = getLocalProducts();
@@ -44,7 +54,6 @@ export default function HomeScreen() {
     setSqliteProducts(localProds);
   }, []);
 
-  // 2. Decoupled sync helper
   const handleSyncMenu = useCallback(async () => {
     setSyncingMenu(true);
     try {
@@ -52,57 +61,102 @@ export default function HomeScreen() {
       saveMenuToLocalDb(response.data);
       refreshLocalMenuData();
       showFeedback('Sync Success', 'Menu downloaded and saved offline!');
-    } catch (error) {
-      console.error('Sync failed:', error);
+    } catch (error: any) {
+      // console.error('Sync failed:', error);
+            console.log('Menu sync failed:', error.message);
+
       showFeedback('Sync Failed', 'Could not sync menu. Check your connection.');
     } finally {
       setSyncingMenu(false);
     }
   }, [refreshLocalMenuData]);
 
-  // 3. Main Bootstrap useEffect - RUNS EXACTLY ONCE ON MOUNT
-// Load profile and automatically sync if database is empty
+  const handleSyncOrders = useCallback(async (isManual: boolean = false) => {
+    const unsynced = getUnsyncedOrders();
+    if (unsynced.length === 0) {
+      if (isManual) {
+        showFeedback('Sync Info', 'All tickets are already up to date!');
+      }
+      return; 
+    }
+
+    if (isManual) {
+      setSyncingOrders(true);
+    }
+
+    try {
+      const response = await apiClient.post('/orders/sync', { orders: unsynced });
+      const { synced_uuids } = response.data;
+
+      if (synced_uuids && synced_uuids.length > 0) {
+        markOrdersAsSynced(synced_uuids);
+        console.log(`Successfully synced ${synced_uuids.length} orders to cloud!`);
+        
+        if (isManual) {
+          showFeedback('Sync Success', `${synced_uuids.length} tickets synchronized!`);
+        }
+      }
+    } catch (error: any) {
+      // console.error('Failed to sync orders to server:', error);
+      console.log('Silent background order sync failed (network offline):', error.message);
+
+      if (isManual) {
+        showFeedback('Sync Failed', 'Could not sync tickets. Check your network.');
+      }
+    } finally {
+      setSyncingOrders(false);
+    }
+  }, []);
+
   useEffect(() => {
     const bootstrapData = async () => {
       try {
-        // 1. Fetch user profile
         const response = await apiClient.get('/user');
         setProfile(response.data);
-
-        // 2. Read local SQLite database
-        const localCats = getLocalCategories();
-        const localProds = getLocalProducts();
-
-        if (localCats.length === 0) {
-          console.log('Local database empty. Syncing...');
-          await handleSyncMenu(); 
-        } else {
-          setSqliteCategories(localCats);
-          setSqliteProducts(localProds);
-          if (localCats.length > 0) {
-            setSelectedCategoryId(localCats[0].id);
-          }
-        }
       } catch (error: any) {
         console.error('Failed to fetch user profile:', error);
-        
-        // 🚀 AUTO-LOGOUT: If the server says the token is invalid/wiped, clear it and return to Login
         if (error.response && error.response.status === 401) {
           showFeedback('Session Expired', 'Please sign in again.');
-          auth?.signOut(); // Clears local SecureStore and returns to login screen
+          auth?.signOut();
         }
-      } finally {
-        setLoading(false);
       }
+
+      const localCats = getLocalCategories();
+      const localProds = getLocalProducts();
+
+      if (localCats.length === 0) {
+        console.log('Local database empty. Syncing...');
+        await handleSyncMenu(); 
+      } else {
+        setSqliteCategories(localCats);
+        setSqliteProducts(localProds);
+        if (localCats.length > 0) {
+          setSelectedCategoryId(localCats[0].id);
+        }
+      }
+
+      await handleSyncOrders();
+      setLoading(false);
+
+
+          // 🚀 NEW: Silent Auto-Sync Background Loop
+    // Every 60 seconds, check if there are any unsynced tickets inside SQLite
+    // and upload them silently in the background without disturbing the cashier!
+    const syncInterval = setInterval(() => {
+      console.log('Automated background sync interval ticking...');
+      
+      handleSyncOrders(false).catch((syncError) => {
+        console.log('Silent background auto-sync failed (network still offline):', syncError.message);
+      });
+    }, 60000); // 60000ms = 60 seconds (Adjust this as you prefer, e.g. 30000 for 30s)
+
+    // Clean up the timer when the cashier logs out or the screen unmounts
+    return () => clearInterval(syncInterval);
     };
 
     bootstrapData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Runs exactly once on mount
-
-  // ==========================================
-  // 🛒 Cart Logic
-  // ==========================================
+  }, []);
 
   const addToCart = (product: any) => {
     setCart((currentCart) => {
@@ -164,6 +218,45 @@ export default function HomeScreen() {
     };
   }, [cart]);
 
+  const processCheckout = async (paymentMethod: string) => {
+    try {
+      const orderUuid = generateUUID();
+
+      const receiptNumber = saveOrderLocally(
+        orderUuid,
+        totals.subtotalExclVat,
+        totals.vatAmount,
+        totals.totalInclVat,
+        cart,
+        paymentMethod
+      );
+
+      clearCart();
+      showFeedback('Commande Enregistrée', `Ticket #${receiptNumber} enregistré hors-ligne.`);
+
+      handleSyncOrders().catch((syncError) => {
+        console.log('Background order sync failed:', syncError.message);
+      });
+
+    } catch (error: any) {
+      console.error('Local checkout save failed:', error);
+      showFeedback('Erreur', 'Impossible d\'enregistrer la commande.');
+    }
+  };
+
+  const handlePayOrder = () => {
+    Alert.alert(
+      'Sélect Mode de Paiement',
+      `Total de la commande: ${totals.totalInclVat.toFixed(2)} €`,
+      [
+        { text: 'Espèces (Cash)', onPress: () => processCheckout('cash') },
+        { text: 'Carte Bancaire (CB)', onPress: () => processCheckout('card') },
+        { text: 'Ticket Resto', onPress: () => processCheckout('meal_voucher') },
+        { text: 'Annuler', style: 'cancel' }
+      ]
+    );
+  };
+
   if (loading) {
     return (
       <View style={styles.center}>
@@ -175,15 +268,27 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={styles.mainContainer}>
-      {/* 1. Header Row */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>🍔 Burger Palace</Text>
         {profile && (
           <View style={styles.headerProfile}>
             <Text style={styles.cashierText}>👤 {profile.name.split(' ')[0]}</Text>
-            <TouchableOpacity style={styles.syncIconButton} onPress={handleSyncMenu} disabled={syncingMenu}>
-              {syncingMenu ? <ActivityIndicator size="small" color="#3182ce" /> : <Text style={styles.syncBtnLabel}>🔄 Sync</Text>}
+            
+            <TouchableOpacity 
+              style={styles.syncIconButton} 
+              onPress={async () => {
+                await handleSyncMenu(); 
+                await handleSyncOrders(true);
+              }} 
+              disabled={syncingMenu || syncingOrders}
+            >
+              {syncingMenu || syncingOrders ? (
+                <ActivityIndicator size="small" color="#3182ce" />
+              ) : (
+                <Text style={styles.syncBtnLabel}>🔄 Sync</Text>
+              )}
             </TouchableOpacity>
+            
             <TouchableOpacity onPress={() => auth?.signOut()} style={styles.logoutButton}>
               <Text style={styles.logoutText}>Sign Out</Text>
             </TouchableOpacity>
@@ -191,10 +296,7 @@ export default function HomeScreen() {
         )}
       </View>
 
-      {/* 2. Split Screen Workspace */}
       <View style={styles.workspace}>
-        
-        {/* Left Column: Cart */}
         <View style={styles.cartColumn}>
           <Text style={styles.sectionHeader}>🛒 Current Ticket</Text>
           
@@ -226,7 +328,6 @@ export default function HomeScreen() {
             </ScrollView>
           )}
 
-          {/* Totals Box */}
           <View style={styles.totalsBox}>
             <View style={styles.totalRow}>
               <Text style={styles.totalLabel}>Subtotal (HT):</Text>
@@ -247,7 +348,7 @@ export default function HomeScreen() {
               </TouchableOpacity>
               <TouchableOpacity 
                 style={[styles.payBtn, cart.length === 0 && styles.disabledBtn]} 
-                onPress={() => showFeedback('Order Processing', 'Proceeding to checkout...')}
+                onPress={handlePayOrder}
                 disabled={cart.length === 0}
               >
                 <Text style={styles.payBtnText}>Pay Order</Text>
@@ -256,10 +357,7 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {/* Right Column: Grid of Products */}
         <View style={styles.gridColumn}>
-          
-          {/* Categories Tab Bar */}
           <View style={styles.categoriesTabBar}>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               {sqliteCategories.map((category) => (
@@ -284,7 +382,6 @@ export default function HomeScreen() {
             </ScrollView>
           </View>
 
-          {/* Grid of Products */}
           <ScrollView contentContainerStyle={styles.productGrid}>
             {sqliteProducts
               .filter((product) => product.category_id === selectedCategoryId)
@@ -300,7 +397,6 @@ export default function HomeScreen() {
               ))}
           </ScrollView>
         </View>
-
       </View>
     </SafeAreaView>
   );
@@ -312,8 +408,8 @@ const isTablet = width > 768;
 const styles = StyleSheet.create({
   mainContainer: {
     flex: 1,
-    backgroundColor: '#1a202c', // Matches header to make notches seamless
-    // paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
+    backgroundColor: '#1a202c', 
+    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
   },
   center: {
     flex: 1,
@@ -327,11 +423,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 0,
+    paddingHorizontal: 15,
   },
   headerTitle: {
     color: '#fff',
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: 'bold',
   },
   headerProfile: {
@@ -368,10 +464,8 @@ const styles = StyleSheet.create({
   workspace: {
     flex: 1,
     flexDirection: isTablet ? 'row' : 'column',
-    backgroundColor: '#fff', // Base background under header
+    backgroundColor: '#fff', 
   },
-  
-  // Left Column (Cart / Ticket)
   cartColumn: {
     flex: isTablet ? 0.4 : 0.55,
     backgroundColor: '#f7fafc',
@@ -520,8 +614,6 @@ const styles = StyleSheet.create({
   disabledBtn: {
     backgroundColor: '#cbd5e0',
   },
-
-  // Right Column (Product Grid)
   gridColumn: {
     flex: isTablet ? 0.6 : 0.45,
     backgroundColor: '#fff',
@@ -569,8 +661,8 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     height: 100,
     justifyContent: 'space-between',
-    elevation: 1, // Android shadow
-    shadowColor: '#000', // iOS shadow
+    elevation: 1, 
+    shadowColor: '#000', 
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
     shadowRadius: 1,
