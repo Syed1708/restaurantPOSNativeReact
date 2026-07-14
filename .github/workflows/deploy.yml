@@ -33,4 +33,4 @@ jobs:
 
       # Step 5: Automatically deploy the update to your Expo account
       - name: Publish EAS Update
-        run: eas update --auto
+        run: eas update --auto --platform ios --platform android # <-- Add the platform flags here
