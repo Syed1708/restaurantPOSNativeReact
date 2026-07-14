@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { apiClient } from '../api/client';
 import { showFeedback } from '../components/toastHelper';
@@ -21,35 +21,19 @@ export default function HomeScreen() {
   const [sqliteCategories, setSqliteCategories] = useState<any[]>([]);
   const [sqliteProducts, setSqliteProducts] = useState<any[]>([]);
 
-  // Load profile and existing SQLite menu on load
-  useEffect(() => {
-    const bootstrapData = async () => {
-      try {
-        const response = await apiClient.get('/user');
-        setProfile(response.data);
-      } catch (error) {
-        console.error('Failed to fetch user profile:', error);
-      } finally {
-        setLoading(false);
-      }
 
-      // Read whatever is currently saved in local SQLite database
-      refreshLocalMenuData();
-    };
-
-    bootstrapData();
-  }, []);
 
   // Reads the SQLite tables and updates the React state
-  const refreshLocalMenuData = () => {
+  // Memoize this function so its reference remains identical across renders
+  const refreshLocalMenuData = useCallback(() => {
     const localCats = getLocalCategories();
     const localProds = getLocalProducts();
     setSqliteCategories(localCats);
     setSqliteProducts(localProds);
-  };
+  }, []);
 
-  // Sync menu from Laravel cloud API into SQLite
-  const handleSyncMenu = async () => {
+  // Memoize this function so it can safely be used inside useEffect
+  const handleSyncMenu = useCallback(async () => {
     setSyncingMenu(true);
     try {
       // 1. Fetch menu JSON from Laragon
@@ -68,7 +52,38 @@ export default function HomeScreen() {
     } finally {
       setSyncingMenu(false);
     }
-  };
+  }, [refreshLocalMenuData]); // Depends on refreshLocalMenuData
+
+  // Load profile and automatically sync if database is empty
+  useEffect(() => {
+    const bootstrapData = async () => {
+      try {
+        // 1. Fetch user profile
+        const response = await apiClient.get('/user');
+        setProfile(response.data);
+      } catch (error) {
+        console.error('Failed to fetch user profile:', error);
+      }
+
+      // 2. Read local SQLite database
+      const localCats = getLocalCategories();
+      const localProds = getLocalProducts();
+
+      if (localCats.length === 0) {
+        // 🚀 AUTOMATIC SYNC: If local database is empty, fetch from server immediately
+        console.log('Local database is empty. Triggering automatic background sync...');
+        await handleSyncMenu(); 
+      } else {
+        // Otherwise, render the offline data instantly
+        setSqliteCategories(localCats);
+        setSqliteProducts(localProds);
+      }
+
+      setLoading(false);
+    };
+
+    bootstrapData();
+  },  [handleSyncMenu]); // 🚀 Perfectly safe now! No infinite loops.
 
   if (loading) {
     return (
