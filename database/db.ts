@@ -56,3 +56,70 @@ export const initLocalDatabase = (): void => {
     console.error("Error initializing database:", error);
   }
 };
+
+// ==========================================
+// 🚀 NEW: Offline Menu Sync Helper Functions
+// ==========================================
+
+interface ProductSyncData {
+  id: number;
+  name: string;
+  price: number;
+  vat_rate: number;
+  is_active: boolean;
+}
+
+interface CategorySyncData {
+  id: number;
+  name: string;
+  products: ProductSyncData[];
+}
+
+/**
+ * Saves the synchronized menu from Laravel into the local SQLite tables safely
+ * using a Database Transaction to ensure data integrity.
+ */
+export const saveMenuToLocalDb = (categories: CategorySyncData[]): void => {
+  db.withTransactionSync(() => {
+    // 1. Clear existing local categories and products to prevent duplicates
+    db.execSync("DELETE FROM products;");
+    db.execSync("DELETE FROM categories;");
+
+    // 2. Loop and insert new menu structure
+    for (const category of categories) {
+      db.runSync("INSERT INTO categories (id, name) VALUES (?, ?);", [
+        category.id,
+        category.name,
+      ]);
+
+      for (const product of category.products) {
+        db.runSync(
+          "INSERT INTO products (id, category_id, name, price, vat_rate, is_active) VALUES (?, ?, ?, ?, ?, ?);",
+          [
+            product.id,
+            category.id,
+            product.name,
+            product.price,
+            product.vat_rate,
+            product.is_active ? 1 : 0,
+          ],
+        );
+      }
+    }
+  });
+  console.log("Local Menu synced and saved to SQLite successfully!");
+};
+
+/**
+ * Retrieve all categories stored inside local SQLite
+ */
+export const getLocalCategories = (): any[] => {
+  return db.getAllSync("SELECT * FROM categories;");
+};
+
+/**
+ * Retrieve all products stored inside local SQLite
+ */
+export const getLocalProducts = (): any[] => {
+  return db.getAllSync("SELECT * FROM products;");
+};
