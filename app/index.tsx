@@ -400,6 +400,7 @@ export default function HomeScreen() {
         </View>
       ) : (
         /* History Section */
+        /* Past Sales History Screen */
         <View style={styles.historyContainer}>
           <Text style={styles.sectionHeader}>📁 Daily Sales & Synced Statuses</Text>
           
@@ -428,8 +429,36 @@ export default function HomeScreen() {
                     
                     <View style={styles.historyStatusGroup}>
                       <Text style={order.is_synced === 1 ? styles.cloudIconSynced : styles.cloudIconOffline}>
-                        {order.is_synced === 1 ? '☁️ Cloud OK' : '⚠️ Offline'}
+                        {order.is_synced === 1 ? '☁️ Cloud' : '⚠️ Offline'}
                       </Text>
+
+                      {/* 📄 NEW: PRINT RECEIPT BUTTON */}
+                      <TouchableOpacity 
+                        style={styles.printRowBtn} 
+                        onPress={() => {
+                          // 1. Query items for this specific order from SQLite
+                          // eslint-disable-next-line @typescript-eslint/no-require-imports
+                          const { db } = require('../database/db');
+                          const items = db.getAllSync('SELECT * FROM local_order_items WHERE order_uuid = ?;', [order.uuid]);
+                          
+                          // 2. Generate ESC/POS layout payloads
+                          // eslint-disable-next-line @typescript-eslint/no-require-imports
+                          const { generateReceiptPayload } = require('../utils/printer');
+                          const { textMock, bytes } = generateReceiptPayload(order, items);
+
+                          // 3. Display receipt layout inside your console
+                          console.log('\n\n--- 📄 SIMULATED THERMAL PRINTER (80mm) ---');
+                          console.log(textMock);
+                          console.log('--- ⚡ HARDWARE COMMANDS EXECUTED ---');
+                          console.log(`[Drawer Kick Command Sent (RJ11 Pin 2)]: ${bytes.includes(0x70) ? 'SUCCESS' : 'FAILED'}`);
+                          console.log(`[Auto-Paper Cut Executed (GS V)]: ${bytes.includes(0x56) ? 'SUCCESS' : 'FAILED'}`);
+                          console.log('-------------------------------------------\n\n');
+
+                          showFeedback('Receipt Printed', `Simulated receipt layout printed to console.`);
+                        }}
+                      >
+                        <Text style={styles.printRowBtnText}>Imprimer</Text>
+                      </TouchableOpacity>
 
                       {order.total_incl_vat > 0 && (
                         <TouchableOpacity 
@@ -766,6 +795,18 @@ const styles = StyleSheet.create({
     color: '#dd6b20',
     fontWeight: '600',
     marginRight: 10,
+  },
+  printRowBtn: {
+    backgroundColor: '#3182ce',
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 5,
+    marginRight: 8,
+  },
+  printRowBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
   },
   refundRowBtn: {
     backgroundColor: '#e53e3e',
