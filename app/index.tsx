@@ -1,7 +1,8 @@
-import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Dimensions, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { apiClient } from '../api/client';
+import POSHeader from '../components/POSHeader'; // Responsive Header Component
 import { showFeedback } from '../components/toastHelper';
 import {
   getLocalCategories,
@@ -13,6 +14,7 @@ import {
   saveMenuToLocalDb,
   saveOrderLocally
 } from '../database/db';
+import { useCart } from '../hooks/useCart'; // Custom Logic Hook
 import { AuthContext } from './_layout';
 
 interface UserProfile {
@@ -21,13 +23,7 @@ interface UserProfile {
   store_id: number;
 }
 
-interface CartItem {
-  id: number;
-  name: string;
-  price: number; 
-  vat_rate: number;
-  quantity: number;
-}
+
 
 const generateUUID = (): string => {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -54,8 +50,8 @@ export default function HomeScreen() {
   const [viewMode, setViewMode] = useState<'register' | 'history'>('register');
   const [historyOrders, setHistoryOrders] = useState<any[]>([]);
 
-  // Shopping Cart state
-  const [cart, setCart] = useState<CartItem[]>([]);
+ // 🚀 Clean Custom Hook for Cart State & Calculations
+  const { cart, addToCart, removeFromCart, clearCart, totals } = useCart();
 
   const refreshLocalMenuData = useCallback(() => {
     const localCats = getLocalCategories();
@@ -174,65 +170,6 @@ export default function HomeScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const addToCart = (product: any) => {
-    setCart((currentCart) => {
-      const existingIndex = currentCart.findIndex((item) => item.id === product.id);
-      if (existingIndex > -1) {
-        const newCart = [...currentCart];
-        newCart[existingIndex].quantity += 1;
-        return newCart;
-      }
-      return [...currentCart, {
-        id: product.id,
-        name: product.name,
-        price: product.price,
-        vat_rate: product.vat_rate,
-        quantity: 1
-      }];
-    });
-  };
-
-  const removeFromCart = (productId: number) => {
-    setCart((currentCart) => {
-      const existingIndex = currentCart.findIndex((item) => item.id === productId);
-      if (existingIndex > -1) {
-        const newCart = [...currentCart];
-        if (newCart[existingIndex].quantity > 1) {
-          newCart[existingIndex].quantity -= 1;
-          return newCart;
-        } else {
-          return newCart.filter((item) => item.id !== productId);
-        }
-      }
-      return currentCart;
-    });
-  };
-
-  const clearCart = () => {
-    setCart([]);
-  };
-
-  const totals = useMemo(() => {
-    let subtotalExclVat = 0; 
-    let vatAmount = 0;        
-    let totalInclVat = 0;     
-
-    cart.forEach((item) => {
-      const itemTotalTtc = item.price * item.quantity;
-      const itemSubtotalHt = itemTotalTtc / (1 + item.vat_rate / 100);
-      const itemVat = itemTotalTtc - itemSubtotalHt;
-
-      subtotalExclVat += itemSubtotalHt;
-      vatAmount += itemVat;
-      totalInclVat += itemTotalTtc;
-    });
-
-    return {
-      subtotalExclVat,
-      vatAmount,
-      totalInclVat,
-    };
-  }, [cart]);
 
   // Payment Logic
   const processCheckout = async (paymentMethod: string) => {
@@ -335,61 +272,30 @@ export default function HomeScreen() {
     );
   }
 
+
   return (
- <SafeAreaView style={styles.mainContainer}>
-      {/* 1. Global Header Row */}
-      <View style={styles.header}>
-        <View style={styles.headerLeft}>
-          <Text style={styles.headerTitle}>🍔 Burger Palace</Text>
-          
-          {/* View Toggles */}
-          <TouchableOpacity 
-            style={[styles.toggleBtn, viewMode === 'register' && styles.toggleBtnActive]}
-            onPress={() => setViewMode('register')}
-          >
-            <Text style={[styles.toggleBtnText, viewMode === 'register' && styles.toggleBtnTextActive]}>⌨️ Register</Text>
-          </TouchableOpacity>
-          <TouchableOpacity 
-            style={[styles.toggleBtn, viewMode === 'history' && styles.toggleBtnActive]}
-            onPress={() => {
-              loadOrdersHistory(); // Reload history from SQLite
-              setViewMode('history');
-            }}
-          >
-            <Text style={[styles.toggleBtnText, viewMode === 'history' && styles.toggleBtnTextActive]}>📁 Past Sales ({historyOrders.length})</Text>
-          </TouchableOpacity>
-        </View>
+    <SafeAreaView style={styles.mainContainer}>
+      {/* 🚀 Render Modular and Responsive POSHeader */}
+      <POSHeader
+        profile={profile}
+        viewMode={viewMode}
+        setViewMode={(mode) => {
+          if (mode === 'history') loadOrdersHistory();
+          setViewMode(mode);
+        }}
+        syncingMenu={syncingMenu}
+        syncingOrders={syncingOrders}
+        onSync={async () => {
+          await handleSyncMenu();
+          await handleSyncOrders(true);
+        }}
+        onSignOut={() => auth?.signOut()}
+      />
 
-        {profile && (
-          <View style={styles.headerProfile}>
-            <Text style={styles.cashierText}>👤 {profile.name.split(' ')[0]}</Text>
-            
-            <TouchableOpacity 
-              style={styles.syncIconButton} 
-              onPress={async () => {
-                await handleSyncMenu(); 
-                await handleSyncOrders(true);
-              }} 
-              disabled={syncingMenu || syncingOrders}
-            >
-              {syncingMenu || syncingOrders ? (
-                <ActivityIndicator size="small" color="#3182ce" />
-              ) : (
-                <Text style={styles.syncBtnLabel}>🔄 Sync</Text>
-              )}
-            </TouchableOpacity>
-            
-            <TouchableOpacity onPress={() => auth?.signOut()} style={styles.logoutButton}>
-              <Text style={styles.logoutText}>Sign Out</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-      </View>
-
-      {/* 2. Workspace Content based on Selected View Mode */}
+      {/* Workspace Area */}
       {viewMode === 'register' ? (
         <View style={styles.workspace}>
-          {/* Left Column: Cart */}
+          {/* Cart Section */}
           <View style={styles.cartColumn}>
             <Text style={styles.sectionHeader}>🛒 Current Ticket</Text>
             
@@ -450,7 +356,7 @@ export default function HomeScreen() {
             </View>
           </View>
 
-          {/* Right Column: Grid of Products */}
+          {/* Product Grid Section */}
           <View style={styles.gridColumn}>
             <View style={styles.categoriesTabBar}>
               <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -493,7 +399,7 @@ export default function HomeScreen() {
           </View>
         </View>
       ) : (
-        /* PAST SALES HISTORY SCREEN */
+        /* History Section */
         <View style={styles.historyContainer}>
           <Text style={styles.sectionHeader}>📁 Daily Sales & Synced Statuses</Text>
           
@@ -521,7 +427,6 @@ export default function HomeScreen() {
                     </Text>
                     
                     <View style={styles.historyStatusGroup}>
-                      {/* Sync cloud checkmarks */}
                       <Text style={order.is_synced === 1 ? styles.cloudIconSynced : styles.cloudIconOffline}>
                         {order.is_synced === 1 ? '☁️ Cloud OK' : '⚠️ Offline'}
                       </Text>
@@ -553,7 +458,7 @@ const styles = StyleSheet.create({
   mainContainer: {
     flex: 1,
     backgroundColor: '#1a202c', 
-    // paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
+    
   },
   center: {
     flex: 1,
@@ -561,80 +466,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#fff',
   },
-  header: {
-    height: 60,
-    backgroundColor: '#1a202c',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 0,
-  },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  headerTitle: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: 'bold',
-    marginRight: 10,
-  },
-  toggleBtn: {
-    paddingVertical: 6,
-    paddingHorizontal: 5,
-    borderRadius: 6,
-    backgroundColor: '#2d3748',
-    marginRight: 10,
-  },
-  toggleBtnActive: {
-    backgroundColor: '#3182ce',
-  },
-  toggleBtnText: {
-    color: '#a0aec0',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  toggleBtnTextActive: {
-    color: '#fff',
-  },
-  headerProfile: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  cashierText: {
-    color: '#e2e8f0',
-    marginRight: 10,
-    fontWeight: '500',
-    fontSize: 10,
-  },
-  syncIconButton: {
-    backgroundColor: '#fff',
-    paddingVertical: 0,
-    paddingHorizontal: 10,
-    borderRadius: 5,
-    marginRight: 10,
-  },
-  syncBtnLabel: {
-    fontSize: 10,
-    fontWeight: 'bold',
-    color: '#4a5568',
-  },
-  logoutButton: {
-    paddingVertical: 5,
-    paddingHorizontal: 8,
-  },
-  logoutText: {
-    color: '#fc8181',
-    fontWeight: 'bold',
-    fontSize: 8,
-  },
   workspace: {
     flex: 1,
     flexDirection: isTablet ? 'row' : 'column',
     backgroundColor: '#fff', 
   },
-  
-  // Left Column (Cart / Ticket)
   cartColumn: {
     flex: isTablet ? 0.4 : 0.55,
     backgroundColor: '#f7fafc',
@@ -783,8 +619,6 @@ const styles = StyleSheet.create({
   disabledBtn: {
     backgroundColor: '#cbd5e0',
   },
-
-  // Right Column (Product Grid)
   gridColumn: {
     flex: isTablet ? 0.6 : 0.45,
     backgroundColor: '#fff',
@@ -848,8 +682,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#4a5568',
   },
-
-  // PAST SALES HISTORY STYLING
   historyContainer: {
     flex: 1,
     backgroundColor: '#fff',

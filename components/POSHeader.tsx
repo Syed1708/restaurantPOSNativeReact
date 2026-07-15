@@ -1,0 +1,149 @@
+// components/POSHeader.tsx
+import React from 'react';
+import { ActivityIndicator, Dimensions, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+
+interface HeaderProps {
+  profile: any;
+  viewMode: 'register' | 'history';
+  setViewMode: (mode: 'register' | 'history') => void;
+  syncingMenu: boolean;
+  syncingOrders: boolean;
+  onSync: () => void;
+  onSignOut: () => void;
+}
+
+const { width } = Dimensions.get('window');
+const isTablet = width > 768; // Detects if the device is an iPad/Tablet
+
+export default function POSHeader({
+  profile,
+  viewMode,
+  setViewMode,
+  syncingMenu,
+  syncingOrders,
+  onSync,
+  onSignOut,
+}: HeaderProps) {
+  return (
+    <View style={styles.header}>
+      
+      {/* Left Column: Toggles & Title */}
+      <View style={styles.headerLeft}>
+        {/* Hide brand logo on small screens to save space */}
+        {isTablet && <Text style={styles.headerTitle}>🍔 Burger Palace</Text>}
+        
+        <TouchableOpacity 
+          style={[styles.toggleBtn, viewMode === 'register' && styles.toggleBtnActive]}
+          onPress={() => setViewMode('register')}
+        >
+          <Text style={[styles.toggleBtnText, viewMode === 'register' && styles.toggleBtnTextActive]}>
+            {isTablet ? '⌨️ Register' : '⌨️ POS'}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity 
+          style={[styles.toggleBtn, viewMode === 'history' && styles.toggleBtnActive]}
+          onPress={() => setViewMode('history')}
+        >
+          <Text style={[styles.toggleBtnText, viewMode === 'history' && styles.toggleBtnTextActive]}>
+            {isTablet ? '📁 Past Sales' : '📁 Sales'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Right Column: Cashier & Sync/Logout */}
+      {profile && (
+        <View style={styles.headerProfile}>
+          {/* Hide Cashier name on small mobile devices to prevent cutoff */}
+          {isTablet && <Text style={styles.cashierText}>👤 {profile.name.split(' ')[0]}</Text>}
+          
+          <TouchableOpacity 
+            style={styles.syncIconButton} 
+            onPress={onSync} 
+            disabled={syncingMenu || syncingOrders}
+          >
+            {syncingMenu || syncingOrders ? (
+              <ActivityIndicator size="small" color="#3182ce" />
+            ) : (
+              <Text style={styles.syncBtnLabel}>🔄 Sync</Text>
+            )}
+          </TouchableOpacity>
+          
+          <TouchableOpacity onPress={onSignOut} style={styles.logoutButton}>
+            <Text style={styles.logoutText}>Sign Out</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  header: {
+    height: 60,
+    backgroundColor: '#1a202c',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: isTablet ? 15 : 8,
+  },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  headerTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginRight: 20,
+  },
+  toggleBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: isTablet ? 12 : 8,
+    borderRadius: 6,
+    backgroundColor: '#2d3748',
+    marginRight: 6,
+  },
+  toggleBtnActive: {
+    backgroundColor: '#3182ce',
+  },
+  toggleBtnText: {
+    color: '#a0aec0',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  toggleBtnTextActive: {
+    color: '#fff',
+  },
+  headerProfile: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  cashierText: {
+    color: '#e2e8f0',
+    marginRight: 10,
+    fontWeight: '500',
+    fontSize: 14,
+  },
+  syncIconButton: {
+    backgroundColor: '#fff',
+    paddingVertical: 5,
+    paddingHorizontal: 8,
+    borderRadius: 5,
+    marginRight: 8,
+  },
+  syncBtnLabel: {
+    fontSize: 11,
+    fontWeight: 'bold',
+    color: '#4a5568',
+  },
+  logoutButton: {
+    paddingVertical: 5,
+    paddingHorizontal: 6,
+  },
+  logoutText: {
+    color: '#fc8181',
+    fontWeight: 'bold',
+    fontSize: 13,
+  },
+});
