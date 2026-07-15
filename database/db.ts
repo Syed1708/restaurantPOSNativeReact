@@ -246,3 +246,87 @@ export const markOrdersAsSynced = (uuids: string[]): void => {
     }
   });
 };
+
+// ======================================================
+// 🚀 NEW: Offline History & Legally Compliant Refunds
+// ======================================================
+
+/**
+ * Fetch all local orders from SQLite (latest first) to display in the history panel
+ */
+export const getLocalOrdersHistory = (): any[] => {
+  return db.getAllSync(
+    "SELECT * FROM local_orders ORDER BY completed_at DESC;",
+  );
+};
+
+/**
+ * Creates a legally compliant negative refund transaction (Avoir) inside SQLite.
+ * It copies the original order's quantities as negative values, ensuring
+ * that the main database sequence remains inalterable.
+ */
+export const refundOrderLocally = (
+  originalUuid: string,
+  totalInclVat: number,
+  subtotalExclVat: number,
+  vatAmount: number,
+  paymentMethod: string,
+): number => {
+  const refundUuid = generateUUID(); // Generates a new unique ID for the refund ticket
+  const sequenceNumber = getNextSequenceNumber(); // Takes the next sequential number
+  const completedAt = new Date().toISOString();
+
+  db.withTransactionSync(() => {
+    // 1. Insert core negative refund order (Avoir)
+    db.runSync(
+      "INSERT INTO local_orders (uuid, sequence_number, subtotal_excl_vat, vat_amount, total_incl_vat, completed_at, is_synced, hash) VALUES (?, ?, ?, ?, ?, ?, 0, ?);",
+      [
+        refundUuid,
+        sequenceNumber,
+        -subtotalExclVat, // Saved as a negative number
+        -vatAmount, // Saved as a negative number
+        -totalInclVat, // Saved as a negative number
+        completedAt,
+        `REFUND-${originalUuid}`, // Reference to the original transaction
+      ],
+    );
+
+    // 2. Fetch original items to duplicate them as negative line items
+    const originalItems: any[] = db.getAllSync(
+      "SELECT * FROM local_order_items WHERE order_uuid = ?;",
+      [originalUuid],
+    );
+
+    for (const item of originalItems) {
+      db.runSync(
+        "INSERT INTO local_order_items (order_uuid, product_id, product_name, quantity, unit_price, vat_rate, subtotal) VALUES (?, ?, ?, ?, ?, ?, ?);",
+        [
+          refundUuid,
+          item.product_id,
+          `REFUND: ${item.product_name}`, // Cleared as a refund item
+          -item.quantity, // Negative quantity
+          item.unit_price,
+          item.vat_rate,
+          -(item.unit_price * item.quantity), // Negative row subtotal
+        ],
+      );
+    }
+
+    // 3. Insert negative payment (reversing the cash/card ledger)
+    db.runSync(
+      "INSERT INTO local_payments (order_uuid, amount, method) VALUES (?, ?, ?);",
+      [refundUuid, -totalInclVat, paymentMethod],
+    );
+  });
+
+  return sequenceNumber;
+};
+
+// Helper inside db.ts (matching our JS UUID helper in index.tsx)
+const generateUUID = (): string => {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+};

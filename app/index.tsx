@@ -1,13 +1,15 @@
 import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Dimensions, Platform, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Dimensions, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { apiClient } from '../api/client';
 import { showFeedback } from '../components/toastHelper';
 import {
   getLocalCategories,
+  getLocalOrdersHistory,
   getLocalProducts,
   getUnsyncedOrders,
   markOrdersAsSynced,
+  refundOrderLocally,
   saveMenuToLocalDb,
   saveOrderLocally
 } from '../database/db';
@@ -42,9 +44,17 @@ export default function HomeScreen() {
   const [syncingMenu, setSyncingMenu] = useState(false);
   const [syncingOrders, setSyncingOrders] = useState(false);
 
+   // SQLite data states
   const [sqliteCategories, setSqliteCategories] = useState<any[]>([]);
   const [sqliteProducts, setSqliteProducts] = useState<any[]>([]);
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null);
+  
+
+    // App View Mode: 'register' (standard touchscreen) vs 'history' (past sales)
+  const [viewMode, setViewMode] = useState<'register' | 'history'>('register');
+  const [historyOrders, setHistoryOrders] = useState<any[]>([]);
+
+  // Shopping Cart state
   const [cart, setCart] = useState<CartItem[]>([]);
 
   const refreshLocalMenuData = useCallback(() => {
@@ -71,6 +81,7 @@ export default function HomeScreen() {
     }
   }, [refreshLocalMenuData]);
 
+  // Cloud Order Sync
   const handleSyncOrders = useCallback(async (isManual: boolean = false) => {
     const unsynced = getUnsyncedOrders();
     if (unsynced.length === 0) {
@@ -95,6 +106,9 @@ export default function HomeScreen() {
         if (isManual) {
           showFeedback('Sync Success', `${synced_uuids.length} tickets synchronized!`);
         }
+
+        // Refresh history to update cloud sync checkmarks if looking at history screen
+        loadOrdersHistory();
       }
     } catch (error: any) {
       // console.error('Failed to sync orders to server:', error);
@@ -107,6 +121,12 @@ export default function HomeScreen() {
       setSyncingOrders(false);
     }
   }, []);
+
+    // Reads the SQLite history table
+  const loadOrdersHistory = () => {
+    const history = getLocalOrdersHistory();
+    setHistoryOrders(history);
+  };
 
   useEffect(() => {
     const bootstrapData = async () => {
@@ -136,25 +156,21 @@ export default function HomeScreen() {
       }
 
       await handleSyncOrders();
+      loadOrdersHistory(); // Cache history on load
       setLoading(false);
-
-
-          // 🚀 NEW: Silent Auto-Sync Background Loop
-    // Every 60 seconds, check if there are any unsynced tickets inside SQLite
-    // and upload them silently in the background without disturbing the cashier!
-    const syncInterval = setInterval(() => {
-      console.log('Automated background sync interval ticking...');
-      
-      handleSyncOrders(false).catch((syncError) => {
-        console.log('Silent background auto-sync failed (network still offline):', syncError.message);
-      });
-    }, 60000); // 60000ms = 60 seconds (Adjust this as you prefer, e.g. 30000 for 30s)
-
-    // Clean up the timer when the cashier logs out or the screen unmounts
-    return () => clearInterval(syncInterval);
     };
 
     bootstrapData();
+
+    // Silent Background Auto-Sync Loop (60 seconds)
+    const syncInterval = setInterval(() => {
+      console.log('Automated background sync interval ticking...');
+      handleSyncOrders(false).catch((syncError) => {
+        console.log('Silent background auto-sync failed (network still offline):', syncError.message);
+      });
+    }, 60000);
+
+    return () => clearInterval(syncInterval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -218,6 +234,7 @@ export default function HomeScreen() {
     };
   }, [cart]);
 
+  // Payment Logic
   const processCheckout = async (paymentMethod: string) => {
     try {
       const orderUuid = generateUUID();
@@ -234,16 +251,21 @@ export default function HomeScreen() {
       clearCart();
       showFeedback('Commande Enregistrée', `Ticket #${receiptNumber} enregistré hors-ligne.`);
 
+      // Reload history and trigger background sync
+      loadOrdersHistory();
+
       handleSyncOrders().catch((syncError) => {
         console.log('Background order sync failed:', syncError.message);
+        
       });
 
     } catch (error: any) {
-      console.error('Local checkout save failed:', error);
+      console.log('Local checkout save failed:', error);
       showFeedback('Erreur', 'Impossible d\'enregistrer la commande.');
     }
   };
 
+  // Payment Mode Selection Alert
   const handlePayOrder = () => {
     Alert.alert(
       'Sélect Mode de Paiement',
@@ -257,6 +279,53 @@ export default function HomeScreen() {
     );
   };
 
+   // ==========================================
+  // ⚖️ Legally Compliant Refund / Avoir Logic
+  // ==========================================
+  const handleRefundPress = (order: any) => {
+    // Prevent double-refunding or refunding a refund ticket itself
+    if (order.total_incl_vat < 0) {
+      showFeedback('Info', 'Ce ticket est déjà un remboursement.');
+      return;
+    }
+
+    Alert.alert(
+      'Confirmer le Remboursement ?',
+      `Voulez-vous générer un avoir de -${order.total_incl_vat.toFixed(2)} € pour le ticket #${order.sequence_number} ?`,
+      [
+        {
+          text: 'Confirmer Remboursement',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // Write a legally compliant negative order (Avoir)
+              const refundReceiptNum = refundOrderLocally(
+                order.uuid,
+                order.total_incl_vat,
+                order.subtotal_excl_vat,
+                order.vat_amount,
+                'cash' // Defaulting to refunding as cash
+              );
+
+              showFeedback('Remboursement Enregistré', `Avoir #${refundReceiptNum} créé.`);
+              
+              // Reload visual lists
+              loadOrdersHistory();
+
+              // Trigger background sync to upload the refund transaction
+              await handleSyncOrders();
+            } catch (error) {
+              console.error('Refund creation failed:', error);
+              showFeedback('Erreur', 'Impossible de procéder au remboursement.');
+            }
+          }
+        },
+        { text: 'Annuler', style: 'cancel' }
+      ]
+    );
+  };
+
+  // Render Logic loading state
   if (loading) {
     return (
       <View style={styles.center}>
@@ -267,9 +336,30 @@ export default function HomeScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.mainContainer}>
+ <SafeAreaView style={styles.mainContainer}>
+      {/* 1. Global Header Row */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>🍔 Burger Palace</Text>
+        <View style={styles.headerLeft}>
+          <Text style={styles.headerTitle}>🍔 Burger Palace</Text>
+          
+          {/* View Toggles */}
+          <TouchableOpacity 
+            style={[styles.toggleBtn, viewMode === 'register' && styles.toggleBtnActive]}
+            onPress={() => setViewMode('register')}
+          >
+            <Text style={[styles.toggleBtnText, viewMode === 'register' && styles.toggleBtnTextActive]}>⌨️ Register</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.toggleBtn, viewMode === 'history' && styles.toggleBtnActive]}
+            onPress={() => {
+              loadOrdersHistory(); // Reload history from SQLite
+              setViewMode('history');
+            }}
+          >
+            <Text style={[styles.toggleBtnText, viewMode === 'history' && styles.toggleBtnTextActive]}>📁 Past Sales ({historyOrders.length})</Text>
+          </TouchableOpacity>
+        </View>
+
         {profile && (
           <View style={styles.headerProfile}>
             <Text style={styles.cashierText}>👤 {profile.name.split(' ')[0]}</Text>
@@ -296,108 +386,162 @@ export default function HomeScreen() {
         )}
       </View>
 
-      <View style={styles.workspace}>
-        <View style={styles.cartColumn}>
-          <Text style={styles.sectionHeader}>🛒 Current Ticket</Text>
+      {/* 2. Workspace Content based on Selected View Mode */}
+      {viewMode === 'register' ? (
+        <View style={styles.workspace}>
+          {/* Left Column: Cart */}
+          <View style={styles.cartColumn}>
+            <Text style={styles.sectionHeader}>🛒 Current Ticket</Text>
+            
+            {cart.length === 0 ? (
+              <View style={styles.emptyCartBox}>
+                <Text style={styles.emptyCartText}>Ticket is empty. Tap items on the right to build order.</Text>
+              </View>
+            ) : (
+              <ScrollView style={styles.cartItemsScroll}>
+                {cart.map((item) => (
+                  <View key={item.id} style={styles.cartItemRow}>
+                    <View style={styles.cartItemInfo}>
+                      <Text style={styles.cartItemName}>{item.name}</Text>
+                      <Text style={styles.cartItemDetails}>
+                        {item.price.toFixed(2)} € (TVA {item.vat_rate}%)
+                      </Text>
+                    </View>
+                    <View style={styles.cartItemActions}>
+                      <TouchableOpacity style={styles.qtyButton} onPress={() => removeFromCart(item.id)}>
+                        <Text style={styles.qtyButtonText}>-</Text>
+                      </TouchableOpacity>
+                      <Text style={styles.cartItemQty}>{item.quantity}</Text>
+                      <TouchableOpacity style={styles.qtyButton} onPress={() => addToCart(item)}>
+                        <Text style={styles.qtyButtonText}>+</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))}
+              </ScrollView>
+            )}
+
+            <View style={styles.totalsBox}>
+              <View style={styles.totalRow}>
+                <Text style={styles.totalLabel}>Subtotal (HT):</Text>
+                <Text style={styles.totalVal}>{totals.subtotalExclVat.toFixed(2)} €</Text>
+              </View>
+              <View style={styles.totalRow}>
+                <Text style={styles.totalLabel}>TVA (Tax):</Text>
+                <Text style={styles.totalVal}>{totals.vatAmount.toFixed(2)} €</Text>
+              </View>
+              <View style={[styles.totalRow, styles.totalRowMain]}>
+                <Text style={styles.totalLabelMain}>Total (TTC):</Text>
+                <Text style={styles.totalValMain}>{totals.totalInclVat.toFixed(2)} €</Text>
+              </View>
+
+              <View style={styles.actionButtonsRow}>
+                <TouchableOpacity style={styles.clearBtn} onPress={clearCart} disabled={cart.length === 0}>
+                  <Text style={styles.clearBtnText}>Clear</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={[styles.payBtn, cart.length === 0 && styles.disabledBtn]} 
+                  onPress={handlePayOrder}
+                  disabled={cart.length === 0}
+                >
+                  <Text style={styles.payBtnText}>Pay Order</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+
+          {/* Right Column: Grid of Products */}
+          <View style={styles.gridColumn}>
+            <View style={styles.categoriesTabBar}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                {sqliteCategories.map((category) => (
+                  <TouchableOpacity
+                    key={category.id}
+                    style={[
+                      styles.categoryTab,
+                      selectedCategoryId === category.id && styles.categoryTabActive,
+                    ]}
+                    onPress={() => setSelectedCategoryId(category.id)}
+                  >
+                    <Text
+                      style={[
+                        styles.categoryTabText,
+                        selectedCategoryId === category.id && styles.categoryTabTextActive,
+                      ]}
+                    >
+                      {category.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            <ScrollView contentContainerStyle={styles.productGrid}>
+              {sqliteProducts
+                .filter((product) => product.category_id === selectedCategoryId)
+                .map((product) => (
+                  <TouchableOpacity
+                    key={product.id}
+                    style={styles.productCard}
+                    onPress={() => addToCart(product)}
+                  >
+                    <Text style={styles.productCardName}>{product.name}</Text>
+                    <Text style={styles.productCardPrice}>{product.price.toFixed(2)} €</Text>
+                  </TouchableOpacity>
+                ))}
+            </ScrollView>
+          </View>
+        </View>
+      ) : (
+        /* PAST SALES HISTORY SCREEN */
+        <View style={styles.historyContainer}>
+          <Text style={styles.sectionHeader}>📁 Daily Sales & Synced Statuses</Text>
           
-          {cart.length === 0 ? (
-            <View style={styles.emptyCartBox}>
-              <Text style={styles.emptyCartText}>Ticket is empty. Tap items on the right to build order.</Text>
+          {historyOrders.length === 0 ? (
+            <View style={styles.emptyHistoryBox}>
+              <Text style={styles.emptyHistoryText}>No transactions recorded today yet.</Text>
             </View>
           ) : (
-            <ScrollView style={styles.cartItemsScroll}>
-              {cart.map((item) => (
-                <View key={item.id} style={styles.cartItemRow}>
-                  <View style={styles.cartItemInfo}>
-                    <Text style={styles.cartItemName}>{item.name}</Text>
-                    <Text style={styles.cartItemDetails}>
-                      {item.price.toFixed(2)} € (TVA {item.vat_rate}%)
+            <ScrollView style={styles.historyScroll}>
+              {historyOrders.map((order) => (
+                <View key={order.uuid} style={[styles.historyRow, order.total_incl_vat < 0 && styles.historyRowRefunded]}>
+                  <View style={styles.historyRowLeft}>
+                    <Text style={styles.historyReceiptNum}>
+                      {order.total_incl_vat < 0 ? '❌ REMBOURSEMENT' : '📄 Receipt'} #{order.sequence_number}
                     </Text>
+                    <Text style={styles.historyTime}>
+                      {new Date(order.completed_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                    </Text>
+                    <Text style={styles.historyUuid}>UUID: {order.uuid.substring(0, 8)}...</Text>
                   </View>
-                  <View style={styles.cartItemActions}>
-                    <TouchableOpacity style={styles.qtyButton} onPress={() => removeFromCart(item.id)}>
-                      <Text style={styles.qtyButtonText}>-</Text>
-                    </TouchableOpacity>
-                    <Text style={styles.cartItemQty}>{item.quantity}</Text>
-                    <TouchableOpacity style={styles.qtyButton} onPress={() => addToCart(item)}>
-                      <Text style={styles.qtyButtonText}>+</Text>
-                    </TouchableOpacity>
+
+                  <View style={styles.historyRowRight}>
+                    <Text style={[styles.historyAmount, order.total_incl_vat < 0 && styles.historyAmountNegative]}>
+                      {order.total_incl_vat.toFixed(2)} €
+                    </Text>
+                    
+                    <View style={styles.historyStatusGroup}>
+                      {/* Sync cloud checkmarks */}
+                      <Text style={order.is_synced === 1 ? styles.cloudIconSynced : styles.cloudIconOffline}>
+                        {order.is_synced === 1 ? '☁️ Cloud OK' : '⚠️ Offline'}
+                      </Text>
+
+                      {order.total_incl_vat > 0 && (
+                        <TouchableOpacity 
+                          style={styles.refundRowBtn} 
+                          onPress={() => handleRefundPress(order)}
+                        >
+                          <Text style={styles.refundRowBtnText}>Rembourser</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
                   </View>
                 </View>
               ))}
             </ScrollView>
           )}
-
-          <View style={styles.totalsBox}>
-            <View style={styles.totalRow}>
-              <Text style={styles.totalLabel}>Subtotal (HT):</Text>
-              <Text style={styles.totalVal}>{totals.subtotalExclVat.toFixed(2)} €</Text>
-            </View>
-            <View style={styles.totalRow}>
-              <Text style={styles.totalLabel}>TVA (Tax):</Text>
-              <Text style={styles.totalVal}>{totals.vatAmount.toFixed(2)} €</Text>
-            </View>
-            <View style={[styles.totalRow, styles.totalRowMain]}>
-              <Text style={styles.totalLabelMain}>Total (TTC):</Text>
-              <Text style={styles.totalValMain}>{totals.totalInclVat.toFixed(2)} €</Text>
-            </View>
-
-            <View style={styles.actionButtonsRow}>
-              <TouchableOpacity style={styles.clearBtn} onPress={clearCart} disabled={cart.length === 0}>
-                <Text style={styles.clearBtnText}>Clear</Text>
-              </TouchableOpacity>
-              <TouchableOpacity 
-                style={[styles.payBtn, cart.length === 0 && styles.disabledBtn]} 
-                onPress={handlePayOrder}
-                disabled={cart.length === 0}
-              >
-                <Text style={styles.payBtnText}>Pay Order</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
         </View>
-
-        <View style={styles.gridColumn}>
-          <View style={styles.categoriesTabBar}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              {sqliteCategories.map((category) => (
-                <TouchableOpacity
-                  key={category.id}
-                  style={[
-                    styles.categoryTab,
-                    selectedCategoryId === category.id && styles.categoryTabActive,
-                  ]}
-                  onPress={() => setSelectedCategoryId(category.id)}
-                >
-                  <Text
-                    style={[
-                      styles.categoryTabText,
-                      selectedCategoryId === category.id && styles.categoryTabTextActive,
-                    ]}
-                  >
-                    {category.name}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-
-          <ScrollView contentContainerStyle={styles.productGrid}>
-            {sqliteProducts
-              .filter((product) => product.category_id === selectedCategoryId)
-              .map((product) => (
-                <TouchableOpacity
-                  key={product.id}
-                  style={styles.productCard}
-                  onPress={() => addToCart(product)}
-                >
-                  <Text style={styles.productCardName}>{product.name}</Text>
-                  <Text style={styles.productCardPrice}>{product.price.toFixed(2)} €</Text>
-                </TouchableOpacity>
-              ))}
-          </ScrollView>
-        </View>
-      </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -409,7 +553,7 @@ const styles = StyleSheet.create({
   mainContainer: {
     flex: 1,
     backgroundColor: '#1a202c', 
-    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
+    // paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
   },
   center: {
     flex: 1,
@@ -423,12 +567,35 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 15,
+    paddingHorizontal: 0,
+  },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   headerTitle: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 10,
     fontWeight: 'bold',
+    marginRight: 10,
+  },
+  toggleBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 5,
+    borderRadius: 6,
+    backgroundColor: '#2d3748',
+    marginRight: 10,
+  },
+  toggleBtnActive: {
+    backgroundColor: '#3182ce',
+  },
+  toggleBtnText: {
+    color: '#a0aec0',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  toggleBtnTextActive: {
+    color: '#fff',
   },
   headerProfile: {
     flexDirection: 'row',
@@ -438,17 +605,17 @@ const styles = StyleSheet.create({
     color: '#e2e8f0',
     marginRight: 10,
     fontWeight: '500',
-    fontSize: 14,
+    fontSize: 10,
   },
   syncIconButton: {
     backgroundColor: '#fff',
-    paddingVertical: 5,
+    paddingVertical: 0,
     paddingHorizontal: 10,
     borderRadius: 5,
     marginRight: 10,
   },
   syncBtnLabel: {
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: 'bold',
     color: '#4a5568',
   },
@@ -459,13 +626,15 @@ const styles = StyleSheet.create({
   logoutText: {
     color: '#fc8181',
     fontWeight: 'bold',
-    fontSize: 14,
+    fontSize: 8,
   },
   workspace: {
     flex: 1,
     flexDirection: isTablet ? 'row' : 'column',
     backgroundColor: '#fff', 
   },
+  
+  // Left Column (Cart / Ticket)
   cartColumn: {
     flex: isTablet ? 0.4 : 0.55,
     backgroundColor: '#f7fafc',
@@ -614,6 +783,8 @@ const styles = StyleSheet.create({
   disabledBtn: {
     backgroundColor: '#cbd5e0',
   },
+
+  // Right Column (Product Grid)
   gridColumn: {
     flex: isTablet ? 0.6 : 0.45,
     backgroundColor: '#fff',
@@ -676,5 +847,103 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: '#4a5568',
+  },
+
+  // PAST SALES HISTORY STYLING
+  historyContainer: {
+    flex: 1,
+    backgroundColor: '#fff',
+    padding: 20,
+  },
+  emptyHistoryBox: {
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+    borderStyle: 'dashed',
+    borderRadius: 8,
+    padding: 40,
+    alignItems: 'center',
+    marginTop: 20,
+  },
+  emptyHistoryText: {
+    color: '#a0aec0',
+    fontSize: 15,
+  },
+  historyScroll: {
+    flex: 1,
+    marginTop: 10,
+  },
+  historyRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 15,
+    borderRadius: 8,
+    backgroundColor: '#f7fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    marginBottom: 12,
+  },
+  historyRowRefunded: {
+    backgroundColor: '#fff5f5',
+    borderColor: '#fed7d7',
+  },
+  historyRowLeft: {
+    flex: 0.6,
+  },
+  historyReceiptNum: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#2d3748',
+  },
+  historyTime: {
+    fontSize: 13,
+    color: '#718096',
+    marginTop: 4,
+  },
+  historyUuid: {
+    fontSize: 11,
+    color: '#a0aec0',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    marginTop: 4,
+  },
+  historyRowRight: {
+    flex: 0.4,
+    alignItems: 'flex-end',
+  },
+  historyAmount: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#2d3748',
+  },
+  historyAmountNegative: {
+    color: '#e53e3e',
+  },
+  historyStatusGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  cloudIconSynced: {
+    fontSize: 13,
+    color: '#38a169',
+    fontWeight: '600',
+    marginRight: 10,
+  },
+  cloudIconOffline: {
+    fontSize: 13,
+    color: '#dd6b20',
+    fontWeight: '600',
+    marginRight: 10,
+  },
+  refundRowBtn: {
+    backgroundColor: '#e53e3e',
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 5,
+  },
+  refundRowBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
   },
 });
