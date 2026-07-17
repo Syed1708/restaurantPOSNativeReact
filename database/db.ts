@@ -1,4 +1,5 @@
 import * as SQLite from "expo-sqlite";
+import { sha256 } from "../utils/crypto"; // 🚀 Import our new SHA-256 helper
 
 // Open or create the local database file
 export const db = SQLite.openDatabaseSync("pos_offline.db");
@@ -122,12 +123,9 @@ export const getLocalProducts = (): any[] => {
 };
 
 // ======================================================
-// 🚀 NEW: Offline Order Save & Cloud Sync SQLite Helpers
+// Offline Order Save & Cloud Sync SQLite Helpers
 // ======================================================
 
-/**
- * Calculates the next sequential receipt number based on the local count
- */
 export const getNextSequenceNumber = (): number => {
   const result: any = db.getFirstSync(
     "SELECT COUNT(*) as count FROM local_orders;",
@@ -136,7 +134,22 @@ export const getNextSequenceNumber = (): number => {
 };
 
 /**
- * Saves a completed sale locally inside SQLite using a single secure database transaction.
+ * 🚀 NEW: Retrieve the cryptographic signature (hash) of the last order.
+ * If this is the very first order of the day, return a default 64-character zero string.
+ */
+export const getLastOrderHash = (): string => {
+  const result: any = db.getFirstSync(
+    "SELECT hash FROM local_orders ORDER BY sequence_number DESC LIMIT 1;",
+  );
+  return (
+    result?.hash ||
+    "0000000000000000000000000000000000000000000000000000000000000000"
+  );
+};
+
+/**
+ * Saves a completed sale locally inside SQLite.
+ * Automatically chains this ticket to the previous one using SHA-256 hashing.
  */
 export const saveOrderLocally = (
   uuid: string,
@@ -149,21 +162,32 @@ export const saveOrderLocally = (
   const sequenceNumber = getNextSequenceNumber();
   const completedAt = new Date().toISOString();
 
+  // 🚀 1. Fetch the previous order's cryptographic hash
+  const previousHash = getLastOrderHash();
+
+  // 🚀 2. Concatenate our current order values with the previous hash
+  const dataToHash = `${sequenceNumber}|${subtotalExclVat.toFixed(2)}|${vatAmount.toFixed(2)}|${totalInclVat.toFixed(2)}|${completedAt}|${previousHash}`;
+
+  // 🚀 3. Calculate our new SHA-256 signature
+  const currentHash = sha256(dataToHash);
+
   db.withTransactionSync(() => {
-    // 1. Save core Order
+    // 4. Save core Order (Including the current hash and previous hash!)
     db.runSync(
-      "INSERT INTO local_orders (uuid, sequence_number, subtotal_excl_vat, vat_amount, total_incl_vat, completed_at, is_synced) VALUES (?, ?, ?, ?, ?, ?, 0);",
+      "INSERT INTO local_orders (uuid, sequence_number, subtotal_excl_vat, vat_amount, total_incl_vat, hash, previous_hash, completed_at, is_synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0);",
       [
         uuid,
         sequenceNumber,
         subtotalExclVat,
         vatAmount,
         totalInclVat,
+        currentHash, // Save current hash
+        previousHash, // Save previous hash
         completedAt,
       ],
     );
 
-    // 2. Save individual items
+    // 5. Save individual items
     for (const item of items) {
       db.runSync(
         "INSERT INTO local_order_items (order_uuid, product_id, product_name, quantity, unit_price, vat_rate, subtotal) VALUES (?, ?, ?, ?, ?, ?, ?);",
@@ -179,7 +203,7 @@ export const saveOrderLocally = (
       );
     }
 
-    // 3. Save payment
+    // 6. Save payment
     db.runSync(
       "INSERT INTO local_payments (order_uuid, amount, method) VALUES (?, ?, ?);",
       [uuid, totalInclVat, paymentMethod],
@@ -189,10 +213,6 @@ export const saveOrderLocally = (
   return sequenceNumber;
 };
 
-/**
- * Queries all local orders that have not been uploaded to Laravel yet,
- * structuring them to match Laravel's bulk sync controller format exactly.
- */
 export const getUnsyncedOrders = (): any[] => {
   const orders: any[] = db.getAllSync(
     "SELECT * FROM local_orders WHERE is_synced = 0;",
@@ -209,12 +229,15 @@ export const getUnsyncedOrders = (): any[] => {
       [order.uuid],
     );
 
+    // Send the hash and previous_hash along with the sync payload!
     payload.push({
       uuid: order.uuid,
       sequence_number: order.sequence_number,
       subtotal_excl_vat: order.subtotal_excl_vat,
       vat_amount: order.vat_amount,
       total_incl_vat: order.total_incl_vat,
+      hash: order.hash, // Send current hash
+      previous_hash: order.previous_hash, // Send previous hash
       completed_at: order.completed_at,
       items: items.map((i) => ({
         product_id: i.product_id,
@@ -234,9 +257,6 @@ export const getUnsyncedOrders = (): any[] => {
   return payload;
 };
 
-/**
- * Marks orders as successfully synced after Laravel returns success confirmations.
- */
 export const markOrdersAsSynced = (uuids: string[]): void => {
   db.withTransactionSync(() => {
     for (const uuid of uuids) {
@@ -247,24 +267,12 @@ export const markOrdersAsSynced = (uuids: string[]): void => {
   });
 };
 
-// ======================================================
-// 🚀 NEW: Offline History & Legally Compliant Refunds
-// ======================================================
-
-/**
- * Fetch all local orders from SQLite (latest first) to display in the history panel
- */
 export const getLocalOrdersHistory = (): any[] => {
   return db.getAllSync(
     "SELECT * FROM local_orders ORDER BY completed_at DESC;",
   );
 };
 
-/**
- * Creates a legally compliant negative refund transaction (Avoir) inside SQLite.
- * It copies the original order's quantities as negative values, ensuring
- * that the main database sequence remains inalterable.
- */
 export const refundOrderLocally = (
   originalUuid: string,
   totalInclVat: number,
@@ -272,26 +280,31 @@ export const refundOrderLocally = (
   vatAmount: number,
   paymentMethod: string,
 ): number => {
-  const refundUuid = generateUUID(); // Generates a new unique ID for the refund ticket
-  const sequenceNumber = getNextSequenceNumber(); // Takes the next sequential number
+  const refundUuid = generateUUID();
+  const sequenceNumber = getNextSequenceNumber();
   const completedAt = new Date().toISOString();
 
+  // 🚀 Fetch previous hash and calculate the negative refund hash
+  const previousHash = getLastOrderHash();
+  const dataToHash = `${sequenceNumber}|${(-subtotalExclVat).toFixed(2)}|${(-vatAmount).toFixed(2)}|${(-totalInclVat).toFixed(2)}|${completedAt}|${previousHash}`;
+  const currentHash = sha256(dataToHash);
+
   db.withTransactionSync(() => {
-    // 1. Insert core negative refund order (Avoir)
+    // Insert core negative refund order (Avoir) with calculated hashes
     db.runSync(
-      "INSERT INTO local_orders (uuid, sequence_number, subtotal_excl_vat, vat_amount, total_incl_vat, completed_at, is_synced, hash) VALUES (?, ?, ?, ?, ?, ?, 0, ?);",
+      "INSERT INTO local_orders (uuid, sequence_number, subtotal_excl_vat, vat_amount, total_incl_vat, hash, previous_hash, completed_at, is_synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0);",
       [
         refundUuid,
         sequenceNumber,
-        -subtotalExclVat, // Saved as a negative number
-        -vatAmount, // Saved as a negative number
-        -totalInclVat, // Saved as a negative number
+        -subtotalExclVat,
+        -vatAmount,
+        -totalInclVat,
+        currentHash, // Save current hash
+        previousHash, // Save previous hash
         completedAt,
-        `REFUND-${originalUuid}`, // Reference to the original transaction
       ],
     );
 
-    // 2. Fetch original items to duplicate them as negative line items
     const originalItems: any[] = db.getAllSync(
       "SELECT * FROM local_order_items WHERE order_uuid = ?;",
       [originalUuid],
@@ -303,16 +316,15 @@ export const refundOrderLocally = (
         [
           refundUuid,
           item.product_id,
-          `REFUND: ${item.product_name}`, // Cleared as a refund item
-          -item.quantity, // Negative quantity
+          `REFUND: ${item.product_name}`,
+          -item.quantity,
           item.unit_price,
           item.vat_rate,
-          -(item.unit_price * item.quantity), // Negative row subtotal
+          -(item.unit_price * item.quantity),
         ],
       );
     }
 
-    // 3. Insert negative payment (reversing the cash/card ledger)
     db.runSync(
       "INSERT INTO local_payments (order_uuid, amount, method) VALUES (?, ?, ?);",
       [refundUuid, -totalInclVat, paymentMethod],
@@ -322,7 +334,6 @@ export const refundOrderLocally = (
   return sequenceNumber;
 };
 
-// Helper inside db.ts (matching our JS UUID helper in index.tsx)
 const generateUUID = (): string => {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
