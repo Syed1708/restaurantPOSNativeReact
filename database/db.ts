@@ -160,7 +160,11 @@ export const saveOrderLocally = (
   paymentMethod: string,
 ): number => {
   const sequenceNumber = getNextSequenceNumber();
-  const completedAt = new Date().toISOString();
+
+  // 🚀 Update this line inside saveOrderLocally:
+  const completedAt = new Date().toISOString().split(".")[0] + "Z";
+  // This outputs a clean, millisecond-free timestamp: "2026-07-18T01:20:00Z"
+  // const completedAt = new Date().toISOString();
 
   // 🚀 1. Fetch the previous order's cryptographic hash
   const previousHash = getLastOrderHash();
@@ -171,10 +175,15 @@ export const saveOrderLocally = (
   // 🚀 3. Calculate our new SHA-256 signature
   const currentHash = sha256(dataToHash);
 
+  // 🚀 THE DIAGNOSTIC LOGS:
+  console.log("\n--- 📄 TABLET HASHING DIAGNOSTIC ---");
+  console.log("Hashed String: ", dataToHash);
+  console.log("Generated Hash:", currentHash);
+  console.log("------------------------------------\n");
   db.withTransactionSync(() => {
     // 4. Save core Order (Including the current hash and previous hash!)
     db.runSync(
-      "INSERT INTO local_orders (uuid, sequence_number, subtotal_excl_vat, vat_amount, total_incl_vat, hash, previous_hash, completed_at, is_synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0);",
+      "INSERT INTO local_orders (uuid, sequence_number, subtotal_excl_vat, vat_amount, total_incl_vat, hash, previous_hash, completed_at, is_synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0);",
       [
         uuid,
         sequenceNumber,
@@ -292,7 +301,7 @@ export const refundOrderLocally = (
   db.withTransactionSync(() => {
     // Insert core negative refund order (Avoir) with calculated hashes
     db.runSync(
-      "INSERT INTO local_orders (uuid, sequence_number, subtotal_excl_vat, vat_amount, total_incl_vat, hash, previous_hash, completed_at, is_synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0);",
+      "INSERT INTO local_orders (uuid, sequence_number, subtotal_excl_vat, vat_amount, total_incl_vat, hash, previous_hash, completed_at, is_synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0);",
       [
         refundUuid,
         sequenceNumber,

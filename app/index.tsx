@@ -118,6 +118,68 @@ export default function HomeScreen() {
     }
   }, []);
 
+  // ==========================================
+  // ☁️ Cloud Order Synchronization Engine (WITH DEBUG LOGS)
+  // ==========================================
+  // const handleSyncOrders = useCallback(async (isManual: boolean = false) => {
+  //   // ⚙️ DEBUG LOG:
+  //   console.log('[Sync Engine] Querying local SQLite for unsynced orders...');
+    
+  //   const unsynced = getUnsyncedOrders();
+    
+  //   // ⚙️ DEBUG LOG:
+  //   console.log(`[Sync Engine] Found ${unsynced.length} unsynced orders inside local SQLite.`);
+
+  //   if (unsynced.length === 0) {
+  //     if (isManual) {
+  //       showFeedback('Sync Info', 'All tickets are already up to date!');
+  //     }
+  //     return; // Exits silently if no data needs syncing
+  //   }
+
+  //   if (isManual) {
+  //     setSyncingOrders(true);
+  //   }
+
+  //   try {
+  //     // ⚙️ DEBUG LOG:
+  //     console.log(`[Sync Engine] Connecting to Laravel API at: ${apiClient.defaults.baseURL}/orders/sync`);
+  //     console.log('[Sync Engine] Sending payload:', JSON.stringify(unsynced, null, 2));
+
+  //     const response = await apiClient.post('/orders/sync', { orders: unsynced });
+  //     const { synced_uuids } = response.data;
+
+  //     // ⚙️ DEBUG LOG:
+  //     console.log('[Sync Engine] Server Response received:', response.status, response.data);
+
+  //     if (synced_uuids && synced_uuids.length > 0) {
+  //       markOrdersAsSynced(synced_uuids);
+  //       console.log(`[Sync Engine] Successfully marked ${synced_uuids.length} orders as synced in SQLite!`);
+        
+  //       if (isManual) {
+  //         showFeedback('Sync Success', `${synced_uuids.length} tickets synchronized!`);
+  //       }
+  //       loadOrdersHistory();
+  //     }
+  //   } catch (error: any) {
+  //     // ⚙️ DEBUG LOG:
+  //     console.log('[Sync Engine] ❌ CRITICAL SYNC FAILURE!');
+  //     if (error.response) {
+  //       console.log(`[Sync Engine] Server returned error status: ${error.response.status}`);
+  //       console.log('[Sync Engine] Server error details:', error.response.data);
+  //     } else {
+  //       console.log('[Sync Engine] Network connection error:', error.message);
+  //     }
+
+  //     if (isManual) {
+  //       showFeedback('Sync Failed', 'Could not sync tickets. Check your network.');
+  //     }
+  //   } finally {
+  //     setSyncingOrders(false);
+  //   }
+  // }, []);
+
+
     // Reads the SQLite history table
   const loadOrdersHistory = () => {
     const history = getLocalOrdersHistory();
