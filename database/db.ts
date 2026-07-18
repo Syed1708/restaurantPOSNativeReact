@@ -1,5 +1,5 @@
 import * as SQLite from "expo-sqlite";
-import { sha256 } from "../utils/crypto"; // 🚀 Import our new SHA-256 helper
+import { sha256 } from "../utils/crypto";
 
 // Open or create the local database file
 export const db = SQLite.openDatabaseSync("pos_offline.db");
@@ -65,6 +65,14 @@ export const initLocalDatabase = (): void => {
   } catch (error) {
     console.error("Error initializing database:", error);
   }
+};
+
+// ======================================================
+// 🚀 NEW: Math Helper to Prevent the "-0.00" floating trap
+// ======================================================
+const formatFloat = (val: number): string => {
+  const formatted = val.toFixed(2);
+  return formatted === "-0.00" ? "0.00" : formatted;
 };
 
 // ==========================================
@@ -133,10 +141,6 @@ export const getNextSequenceNumber = (): number => {
   return (result?.count || 0) + 1;
 };
 
-/**
- * 🚀 NEW: Retrieve the cryptographic signature (hash) of the last order.
- * If this is the very first order of the day, return a default 64-character zero string.
- */
 export const getLastOrderHash = (): string => {
   const result: any = db.getFirstSync(
     "SELECT hash FROM local_orders ORDER BY sequence_number DESC LIMIT 1;",
@@ -147,10 +151,6 @@ export const getLastOrderHash = (): string => {
   );
 };
 
-/**
- * Saves a completed sale locally inside SQLite.
- * Automatically chains this ticket to the previous one using SHA-256 hashing.
- */
 export const saveOrderLocally = (
   uuid: string,
   subtotalExclVat: number,
@@ -160,28 +160,19 @@ export const saveOrderLocally = (
   paymentMethod: string,
 ): number => {
   const sequenceNumber = getNextSequenceNumber();
-
-  // 🚀 Update this line inside saveOrderLocally:
   const completedAt = new Date().toISOString().split(".")[0] + "Z";
-  // This outputs a clean, millisecond-free timestamp: "2026-07-18T01:20:00Z"
-  // const completedAt = new Date().toISOString();
 
-  // 🚀 1. Fetch the previous order's cryptographic hash
   const previousHash = getLastOrderHash();
 
-  // 🚀 2. Concatenate our current order values with the previous hash
-  const dataToHash = `${sequenceNumber}|${subtotalExclVat.toFixed(2)}|${vatAmount.toFixed(2)}|${totalInclVat.toFixed(2)}|${completedAt}|${previousHash}`;
-
-  // 🚀 3. Calculate our new SHA-256 signature
+  // 🚀 Uses formatFloat helper to ensure 100% precision with PHP/MySQL
+  // wehere "-0.00" is not a valid float representation for refunds, so we prevent it here
+  // This ensures that the hash generated is consistent with the server-side implementation.
+  // hashing with positive values for refunds would lead to a mismatch in hash validation on the server.
+  // then when i check php artisan pos:verify-chain to veify the integrity of the chain, it will pass successfully because we negetive the values for refunds and hash them correctly with the formatFloat helper to ensure consistency with the server-side implementation.
+  const dataToHash = `${sequenceNumber}|${formatFloat(subtotalExclVat)}|${formatFloat(vatAmount)}|${formatFloat(totalInclVat)}|${completedAt}|${previousHash}`;
   const currentHash = sha256(dataToHash);
 
-  // 🚀 THE DIAGNOSTIC LOGS:
-  console.log("\n--- 📄 TABLET HASHING DIAGNOSTIC ---");
-  console.log("Hashed String: ", dataToHash);
-  console.log("Generated Hash:", currentHash);
-  console.log("------------------------------------\n");
   db.withTransactionSync(() => {
-    // 4. Save core Order (Including the current hash and previous hash!)
     db.runSync(
       "INSERT INTO local_orders (uuid, sequence_number, subtotal_excl_vat, vat_amount, total_incl_vat, hash, previous_hash, completed_at, is_synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0);",
       [
@@ -190,13 +181,12 @@ export const saveOrderLocally = (
         subtotalExclVat,
         vatAmount,
         totalInclVat,
-        currentHash, // Save current hash
-        previousHash, // Save previous hash
+        currentHash,
+        previousHash,
         completedAt,
       ],
     );
 
-    // 5. Save individual items
     for (const item of items) {
       db.runSync(
         "INSERT INTO local_order_items (order_uuid, product_id, product_name, quantity, unit_price, vat_rate, subtotal) VALUES (?, ?, ?, ?, ?, ?, ?);",
@@ -212,7 +202,6 @@ export const saveOrderLocally = (
       );
     }
 
-    // 6. Save payment
     db.runSync(
       "INSERT INTO local_payments (order_uuid, amount, method) VALUES (?, ?, ?);",
       [uuid, totalInclVat, paymentMethod],
@@ -238,15 +227,14 @@ export const getUnsyncedOrders = (): any[] => {
       [order.uuid],
     );
 
-    // Send the hash and previous_hash along with the sync payload!
     payload.push({
       uuid: order.uuid,
       sequence_number: order.sequence_number,
       subtotal_excl_vat: order.subtotal_excl_vat,
       vat_amount: order.vat_amount,
       total_incl_vat: order.total_incl_vat,
-      hash: order.hash, // Send current hash
-      previous_hash: order.previous_hash, // Send previous hash
+      hash: order.hash,
+      previous_hash: order.previous_hash,
       completed_at: order.completed_at,
       items: items.map((i) => ({
         product_id: i.product_id,
@@ -291,15 +279,15 @@ export const refundOrderLocally = (
 ): number => {
   const refundUuid = generateUUID();
   const sequenceNumber = getNextSequenceNumber();
-  const completedAt = new Date().toISOString();
+  const completedAt = new Date().toISOString().split(".")[0] + "Z";
 
-  // 🚀 Fetch previous hash and calculate the negative refund hash
   const previousHash = getLastOrderHash();
-  const dataToHash = `${sequenceNumber}|${(-subtotalExclVat).toFixed(2)}|${(-vatAmount).toFixed(2)}|${(-totalInclVat).toFixed(2)}|${completedAt}|${previousHash}`;
+
+  // 🚀 Uses formatFloat helper to prevent any "-0.00" trailing decimals for refunds
+  const dataToHash = `${sequenceNumber}|${formatFloat(-subtotalExclVat)}|${formatFloat(-vatAmount)}|${formatFloat(-totalInclVat)}|${completedAt}|${previousHash}`;
   const currentHash = sha256(dataToHash);
 
   db.withTransactionSync(() => {
-    // Insert core negative refund order (Avoir) with calculated hashes
     db.runSync(
       "INSERT INTO local_orders (uuid, sequence_number, subtotal_excl_vat, vat_amount, total_incl_vat, hash, previous_hash, completed_at, is_synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0);",
       [
@@ -308,8 +296,8 @@ export const refundOrderLocally = (
         -subtotalExclVat,
         -vatAmount,
         -totalInclVat,
-        currentHash, // Save current hash
-        previousHash, // Save previous hash
+        currentHash,
+        previousHash,
         completedAt,
       ],
     );
