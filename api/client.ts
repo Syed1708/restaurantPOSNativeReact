@@ -2,8 +2,8 @@ import axios from "axios";
 import * as SecureStore from "expo-secure-store";
 
 // ⚠️ Replace this with your actual computer IP address (e.g. 'http://192.168.1.50:8000/api')
-// const BASE_URL = "http://10.178.169.244:8000/api";
-const BASE_URL = "http://127.0.0.1:8000/api";
+const BASE_URL = "http://10.178.169.244:8000/api";
+// const BASE_URL = "http://127.0.0.1:8000/api";
 // const BASE_URL = "http://10.178.169.244:8000/api";
 // const BASE_URL ="https://bzmlh-2a01-cb01-305c-3de3-6110-424-996a-458c.run.pinggy-free.link/api";
 
