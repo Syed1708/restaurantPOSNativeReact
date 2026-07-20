@@ -1,3 +1,4 @@
+// database/db.ts
 import * as SQLite from "expo-sqlite";
 import { sha256 } from "../utils/crypto";
 
@@ -36,7 +37,8 @@ export const initLocalDatabase = (): void => {
         hash TEXT,
         previous_hash TEXT,
         completed_at TEXT NOT NULL,
-        is_synced INTEGER DEFAULT 0
+        is_synced INTEGER DEFAULT 0,
+        local_daily_closure_id INTEGER -- 🚀 Link to local daily closures
       );
 
       -- Local Order Items
@@ -60,16 +62,41 @@ export const initLocalDatabase = (): void => {
         method TEXT NOT NULL,
         FOREIGN KEY (order_uuid) REFERENCES local_orders (uuid)
       );
+
+      -- 🚀 NEW: Local Daily Closures (Z-Reports) Table
+      CREATE TABLE IF NOT EXISTS local_daily_closures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        z_number INTEGER UNIQUE NOT NULL,
+        total_ttc REAL NOT NULL,
+        total_ht REAL NOT NULL,
+        total_tva REAL NOT NULL,
+        hash TEXT NOT NULL,
+        previous_hash TEXT NOT NULL,
+        closed_at TEXT NOT NULL,
+        is_synced INTEGER DEFAULT 0
+      );
     `);
+
+    // 🚀 AUTOMATED DB UPGRADE:
+    // This safely adds the 'local_daily_closure_id' column to existing local_orders tables
+    // on previous installations without throwing errors or requiring uninstallation!
+    try {
+      db.execSync(
+        "ALTER TABLE local_orders ADD COLUMN local_daily_closure_id INTEGER;",
+      );
+      console.log(
+        "Local Database upgraded successfully: local_daily_closure_id column added!",
+      );
+    } catch (error) {
+      // Column already exists, ignore!
+    }
+
     console.log("Local SQLite Database Initialized successfully!");
   } catch (error) {
     console.error("Error initializing database:", error);
   }
 };
 
-// ======================================================
-// 🚀 NEW: Math Helper to Prevent the "-0.00" floating trap
-// ======================================================
 const formatFloat = (val: number): string => {
   const formatted = val.toFixed(2);
   return formatted === "-0.00" ? "0.00" : formatted;
@@ -164,11 +191,6 @@ export const saveOrderLocally = (
 
   const previousHash = getLastOrderHash();
 
-  // 🚀 Uses formatFloat helper to ensure 100% precision with PHP/MySQL
-  // wehere "-0.00" is not a valid float representation for refunds, so we prevent it here
-  // This ensures that the hash generated is consistent with the server-side implementation.
-  // hashing with positive values for refunds would lead to a mismatch in hash validation on the server.
-  // then when i check php artisan pos:verify-chain to veify the integrity of the chain, it will pass successfully because we negetive the values for refunds and hash them correctly with the formatFloat helper to ensure consistency with the server-side implementation.
   const dataToHash = `${sequenceNumber}|${formatFloat(subtotalExclVat)}|${formatFloat(vatAmount)}|${formatFloat(totalInclVat)}|${completedAt}|${previousHash}`;
   const currentHash = sha256(dataToHash);
 
@@ -283,7 +305,6 @@ export const refundOrderLocally = (
 
   const previousHash = getLastOrderHash();
 
-  // 🚀 Uses formatFloat helper to prevent any "-0.00" trailing decimals for refunds
   const dataToHash = `${sequenceNumber}|${formatFloat(-subtotalExclVat)}|${formatFloat(-vatAmount)}|${formatFloat(-totalInclVat)}|${completedAt}|${previousHash}`;
   const currentHash = sha256(dataToHash);
 
@@ -329,6 +350,101 @@ export const refundOrderLocally = (
   });
 
   return sequenceNumber;
+};
+
+// ======================================================
+// 🚀 NEW: Local Daily Z-Report SQLite Helpers (Archiving)
+// ======================================================
+
+/**
+ * Get all local orders that have not been closed/archived yet.
+ */
+export const getLocalOpenOrders = (): any[] => {
+  return db.getAllSync(
+    "SELECT * FROM local_orders WHERE local_daily_closure_id IS NULL;",
+  );
+};
+
+/**
+ * Get the cryptographic hash of the last Daily Z-Report.
+ * If this is Z #1, returns a standard 64-character zero string.
+ */
+export const getLastZReportHash = (): string => {
+  const result: any = db.getFirstSync(
+    "SELECT hash FROM local_daily_closures ORDER BY z_number DESC LIMIT 1;",
+  );
+  return (
+    result?.hash ||
+    "0000000000000000000000000000000000000000000000000000000000000000"
+  );
+};
+
+/**
+ * Get the next daily closure sequential number.
+ */
+export const getNextZNumber = (): number => {
+  const result: any = db.getFirstSync(
+    "SELECT COUNT(*) as count FROM local_daily_closures;",
+  );
+  return (result?.count || 0) + 1;
+};
+
+/**
+ * Compiles and fige/freezes all open orders inside local SQLite,
+ * calculating HT/TVA/TTC daily sums and generating the secure Daily Hash chain.
+ */
+export const closeDayLocally = (): {
+  zNumber: number;
+  totalTtc: number;
+  totalHt: number;
+  totalTva: number;
+  hash: string;
+} => {
+  const openOrders = getLocalOpenOrders();
+  const nextZ = getNextZNumber();
+  const closedAt = new Date().toISOString().split(".")[0] + "Z";
+
+  // 1. Calculate Daily Totals
+  let totalTtc = 0;
+  let totalHt = 0;
+  let totalTva = 0;
+
+  openOrders.forEach((order) => {
+    totalTtc += order.total_incl_vat;
+    totalHt += order.subtotal_excl_vat;
+    totalTva += order.vat_amount;
+  });
+
+  // 2. Fetch the previous daily Z-Report's hash
+  const previousHash = getLastZReportHash();
+
+  // 3. Construct the daily hash string and generate the Daily Hash
+  const dataToHash = `${nextZ}|${formatFloat(totalHt)}|${formatFloat(totalTva)}|${formatFloat(totalTtc)}|${closedAt}|${previousHash}`;
+  const currentHash = sha256(dataToHash);
+
+  db.withTransactionSync(() => {
+    // 4. Save the Z-Report Row
+    db.runSync(
+      "INSERT INTO local_daily_closures (z_number, total_ttc, total_ht, total_tva, hash, previous_hash, closed_at, is_synced) VALUES (?, ?, ?, ?, ?, ?, ?, 0);",
+      [nextZ, totalTtc, totalHt, totalTva, currentHash, previousHash, closedAt],
+    );
+
+    // 5. Get the newly inserted closure ID
+    const closureResult: any = db.getFirstSync(
+      "SELECT last_insert_rowid() as id;",
+    );
+    const closureId = closureResult?.id;
+
+    if (closureId) {
+      // 6. 🛡️ FREEZE ORDERS: Update all unclosed orders with this closure ID
+      db.runSync(
+        "UPDATE local_orders SET local_daily_closure_id = ? WHERE local_daily_closure_id IS NULL;",
+        [closureId],
+      );
+    }
+  });
+
+  return { zNumber: nextZ, totalTtc, totalHt, totalTva, hash: currentHash };
 };
 
 const generateUUID = (): string => {

@@ -1,11 +1,14 @@
+// app/index.tsx
 import React, { useCallback, useContext, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Dimensions, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Dimensions, Platform, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { apiClient } from '../api/client';
-import POSHeader from '../components/POSHeader'; // Responsive Header Component
+import POSHeader from '../components/POSHeader';
 import { showFeedback } from '../components/toastHelper';
 import {
+  closeDayLocally,
   getLocalCategories,
+  getLocalOpenOrders,
   getLocalOrdersHistory,
   getLocalProducts,
   getUnsyncedOrders,
@@ -14,7 +17,7 @@ import {
   saveMenuToLocalDb,
   saveOrderLocally
 } from '../database/db';
-import { useCart } from '../hooks/useCart'; // Custom Logic Hook
+import { useCart } from '../hooks/useCart';
 import { AuthContext } from './_layout';
 
 interface UserProfile {
@@ -22,8 +25,6 @@ interface UserProfile {
   email: string;
   store_id: number;
 }
-
-
 
 const generateUUID = (): string => {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -40,17 +41,16 @@ export default function HomeScreen() {
   const [syncingMenu, setSyncingMenu] = useState(false);
   const [syncingOrders, setSyncingOrders] = useState(false);
 
-   // SQLite data states
+  // SQLite data states
   const [sqliteCategories, setSqliteCategories] = useState<any[]>([]);
   const [sqliteProducts, setSqliteProducts] = useState<any[]>([]);
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null);
-  
 
-    // App View Mode: 'register' (standard touchscreen) vs 'history' (past sales)
+  // Layout View Modes
   const [viewMode, setViewMode] = useState<'register' | 'history'>('register');
   const [historyOrders, setHistoryOrders] = useState<any[]>([]);
 
- // 🚀 Clean Custom Hook for Cart State & Calculations
+  // Custom Hook for Cart State & Calculations
   const { cart, addToCart, removeFromCart, clearCart, totals } = useCart();
 
   const refreshLocalMenuData = useCallback(() => {
@@ -67,17 +67,14 @@ export default function HomeScreen() {
       saveMenuToLocalDb(response.data);
       refreshLocalMenuData();
       showFeedback('Sync Success', 'Menu downloaded and saved offline!');
-    } catch (error: any) {
-      // console.error('Sync failed:', error);
-            console.log('Menu sync failed:', error.message);
-
+    } catch (error) {
+      console.log('Menu sync failed:', error);
       showFeedback('Sync Failed', 'Could not sync menu. Check your connection.');
     } finally {
       setSyncingMenu(false);
     }
   }, [refreshLocalMenuData]);
 
-  // Cloud Order Sync
   const handleSyncOrders = useCallback(async (isManual: boolean = false) => {
     const unsynced = getUnsyncedOrders();
     if (unsynced.length === 0) {
@@ -97,19 +94,13 @@ export default function HomeScreen() {
 
       if (synced_uuids && synced_uuids.length > 0) {
         markOrdersAsSynced(synced_uuids);
-        console.log(`Successfully synced ${synced_uuids.length} orders to cloud!`);
-        
+        loadOrdersHistory();
         if (isManual) {
           showFeedback('Sync Success', `${synced_uuids.length} tickets synchronized!`);
         }
-
-        // Refresh history to update cloud sync checkmarks if looking at history screen
-        loadOrdersHistory();
       }
     } catch (error: any) {
-      // console.error('Failed to sync orders to server:', error);
-      console.log('Silent background order sync failed (network offline):', error.message);
-
+      console.log('Silent background order sync failed:', error.message);
       if (isManual) {
         showFeedback('Sync Failed', 'Could not sync tickets. Check your network.');
       }
@@ -118,69 +109,6 @@ export default function HomeScreen() {
     }
   }, []);
 
-  // ==========================================
-  // ☁️ Cloud Order Synchronization Engine (WITH DEBUG LOGS)
-  // ==========================================
-  // const handleSyncOrders = useCallback(async (isManual: boolean = false) => {
-  //   // ⚙️ DEBUG LOG:
-  //   console.log('[Sync Engine] Querying local SQLite for unsynced orders...');
-    
-  //   const unsynced = getUnsyncedOrders();
-    
-  //   // ⚙️ DEBUG LOG:
-  //   console.log(`[Sync Engine] Found ${unsynced.length} unsynced orders inside local SQLite.`);
-
-  //   if (unsynced.length === 0) {
-  //     if (isManual) {
-  //       showFeedback('Sync Info', 'All tickets are already up to date!');
-  //     }
-  //     return; // Exits silently if no data needs syncing
-  //   }
-
-  //   if (isManual) {
-  //     setSyncingOrders(true);
-  //   }
-
-  //   try {
-  //     // ⚙️ DEBUG LOG:
-  //     console.log(`[Sync Engine] Connecting to Laravel API at: ${apiClient.defaults.baseURL}/orders/sync`);
-  //     console.log('[Sync Engine] Sending payload:', JSON.stringify(unsynced, null, 2));
-
-  //     const response = await apiClient.post('/orders/sync', { orders: unsynced });
-  //     const { synced_uuids } = response.data;
-
-  //     // ⚙️ DEBUG LOG:
-  //     console.log('[Sync Engine] Server Response received:', response.status, response.data);
-
-  //     if (synced_uuids && synced_uuids.length > 0) {
-  //       markOrdersAsSynced(synced_uuids);
-  //       console.log(`[Sync Engine] Successfully marked ${synced_uuids.length} orders as synced in SQLite!`);
-        
-  //       if (isManual) {
-  //         showFeedback('Sync Success', `${synced_uuids.length} tickets synchronized!`);
-  //       }
-  //       loadOrdersHistory();
-  //     }
-  //   } catch (error: any) {
-  //     // ⚙️ DEBUG LOG:
-  //     console.log('[Sync Engine] ❌ CRITICAL SYNC FAILURE!');
-  //     if (error.response) {
-  //       console.log(`[Sync Engine] Server returned error status: ${error.response.status}`);
-  //       console.log('[Sync Engine] Server error details:', error.response.data);
-  //     } else {
-  //       console.log('[Sync Engine] Network connection error:', error.message);
-  //     }
-
-  //     if (isManual) {
-  //       showFeedback('Sync Failed', 'Could not sync tickets. Check your network.');
-  //     }
-  //   } finally {
-  //     setSyncingOrders(false);
-  //   }
-  // }, []);
-
-
-    // Reads the SQLite history table
   const loadOrdersHistory = () => {
     const history = getLocalOrdersHistory();
     setHistoryOrders(history);
@@ -203,7 +131,6 @@ export default function HomeScreen() {
       const localProds = getLocalProducts();
 
       if (localCats.length === 0) {
-        console.log('Local database empty. Syncing...');
         await handleSyncMenu(); 
       } else {
         setSqliteCategories(localCats);
@@ -214,17 +141,15 @@ export default function HomeScreen() {
       }
 
       await handleSyncOrders();
-      loadOrdersHistory(); // Cache history on load
+      loadOrdersHistory();
       setLoading(false);
     };
 
     bootstrapData();
 
-    // Silent Background Auto-Sync Loop (60 seconds)
     const syncInterval = setInterval(() => {
-      console.log('Automated background sync interval ticking...');
       handleSyncOrders(false).catch((syncError) => {
-        console.log('Silent background auto-sync failed (network still offline):', syncError.message);
+        console.log('Silent background auto-sync failed:', syncError.message);
       });
     }, 60000);
 
@@ -232,8 +157,6 @@ export default function HomeScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-
-  // Payment Logic
   const processCheckout = async (paymentMethod: string) => {
     try {
       const orderUuid = generateUUID();
@@ -248,23 +171,19 @@ export default function HomeScreen() {
       );
 
       clearCart();
-      showFeedback('Commande Enregistrée', `Ticket #${receiptNumber} enregistré hors-ligne.`);
-
-      // Reload history and trigger background sync
+      showFeedback('Commande Enregistrée', `Ticket #${receiptNumber} enregistré.`);
       loadOrdersHistory();
-
+      
       handleSyncOrders().catch((syncError) => {
         console.log('Background order sync failed:', syncError.message);
-        
       });
 
-    } catch (error: any) {
-      console.log('Local checkout save failed:', error);
+    } catch (error) {
+      console.error('Local checkout failed:', error);
       showFeedback('Erreur', 'Impossible d\'enregistrer la commande.');
     }
   };
 
-  // Payment Mode Selection Alert
   const handlePayOrder = () => {
     Alert.alert(
       'Sélect Mode de Paiement',
@@ -278,11 +197,7 @@ export default function HomeScreen() {
     );
   };
 
-   // ==========================================
-  // ⚖️ Legally Compliant Refund / Avoir Logic
-  // ==========================================
   const handleRefundPress = (order: any) => {
-    // Prevent double-refunding or refunding a refund ticket itself
     if (order.total_incl_vat < 0) {
       showFeedback('Info', 'Ce ticket est déjà un remboursement.');
       return;
@@ -293,29 +208,24 @@ export default function HomeScreen() {
       `Voulez-vous générer un avoir de -${order.total_incl_vat.toFixed(2)} € pour le ticket #${order.sequence_number} ?`,
       [
         {
-          text: 'Confirmer Remboursement',
+          text: 'Confirmer',
           style: 'destructive',
           onPress: async () => {
             try {
-              // Write a legally compliant negative order (Avoir)
               const refundReceiptNum = refundOrderLocally(
                 order.uuid,
                 order.total_incl_vat,
                 order.subtotal_excl_vat,
                 order.vat_amount,
-                'cash' // Defaulting to refunding as cash
+                'cash'
               );
 
               showFeedback('Remboursement Enregistré', `Avoir #${refundReceiptNum} créé.`);
-              
-              // Reload visual lists
               loadOrdersHistory();
-
-              // Trigger background sync to upload the refund transaction
               await handleSyncOrders();
             } catch (error) {
-              console.error('Refund creation failed:', error);
-              showFeedback('Erreur', 'Impossible de procéder au remboursement.');
+              console.error('Refund failed:', error);
+              showFeedback('Erreur', 'Impossible de rembourser.');
             }
           }
         },
@@ -324,7 +234,64 @@ export default function HomeScreen() {
     );
   };
 
-  // Render Logic loading state
+  // ==========================================
+  // 🔒 NEW: Offline Daily Z-Report Closer (Archiving)
+  // ==========================================
+  const handleLocalCloseDay = () => {
+    const openOrders = getLocalOpenOrders();
+
+    if (openOrders.length === 0) {
+      Alert.alert('Clôture Impossible', 'Aucune vente ouverte à clôturer pour aujourd\'hui.');
+      return;
+    }
+
+    Alert.alert(
+      '🔒 Lancer la Clôture Journalière ?',
+      `Voulez-vous effectuer la clôture (Z-Report) ? Cela figera définitivement ${openOrders.length} tickets de vente.`,
+      [
+        {
+          text: 'Confirmer la Clôture',
+          style: 'destructive',
+          onPress: () => {
+            try {
+              // 1. Run local Z-Report math, hash chain, and freeze in SQLite
+              const zReport = closeDayLocally();
+
+              // 2. Format a gorgeous simulated thermal Z-Report for console
+              const formattedDate = new Date().toLocaleString('fr-FR');
+              
+              let zText = `\n\n=== 🔒 CLÔTURE JOURNALIÈRE (Z-REPORT) ===\n`;
+              zText += `Burger Palace Single-Store POS\n`;
+              zText += `Z-Number      : #${zReport.zNumber}\n`;
+              zText += `Date Clôture  : ${formattedDate}\n`;
+              zText += `Tickets Clos  : ${openOrders.length}\n`;
+              zText += `-------------------------------------------\n`;
+              zText += `Chiffre d'Affaires (TTC) : ${zReport.totalTtc.toFixed(2)} €\n`;
+              zText += `Chiffre d'Affaires (HT)  : ${zReport.totalHt.toFixed(2)} €\n`;
+              zText += `Total TVA Collecté       : ${zReport.totalTva.toFixed(2)} €\n`;
+              zText += `-------------------------------------------\n`;
+              zText += `DAILY SIGNATURE HASH (SHA-256):\n`;
+              zText += `${zReport.hash}\n`;
+              zText += `===========================================\n\n`;
+
+              console.log(zText);
+
+              showFeedback('Z-Report Généré', `Z #${zReport.zNumber} clôturé avec succès.`);
+              
+              // Refresh history lists
+              loadOrdersHistory();
+
+            } catch (error) {
+              console.error('Daily closure failed:', error);
+              showFeedback('Erreur', 'Impossible d\'effectuer la clôture.');
+            }
+          }
+        },
+        { text: 'Annuler', style: 'cancel' }
+      ]
+    );
+  };
+
   if (loading) {
     return (
       <View style={styles.center}>
@@ -334,10 +301,9 @@ export default function HomeScreen() {
     );
   }
 
-
   return (
     <SafeAreaView style={styles.mainContainer}>
-      {/* 🚀 Render Modular and Responsive POSHeader */}
+      {/* 🚀 Render POSHeader with newly added onCloseDay hook */}
       <POSHeader
         profile={profile}
         viewMode={viewMode}
@@ -352,6 +318,7 @@ export default function HomeScreen() {
           await handleSyncOrders(true);
         }}
         onSignOut={() => auth?.signOut()}
+        onCloseDay={handleLocalCloseDay} // 🚀 Pass the Close Day handler!
       />
 
       {/* Workspace Area */}
@@ -462,7 +429,6 @@ export default function HomeScreen() {
         </View>
       ) : (
         /* History Section */
-        /* Past Sales History Screen */
         <View style={styles.historyContainer}>
           <Text style={styles.sectionHeader}>📁 Daily Sales & Synced Statuses</Text>
           
@@ -491,36 +457,8 @@ export default function HomeScreen() {
                     
                     <View style={styles.historyStatusGroup}>
                       <Text style={order.is_synced === 1 ? styles.cloudIconSynced : styles.cloudIconOffline}>
-                        {order.is_synced === 1 ? '☁️ Cloud' : '⚠️ Offline'}
+                        {order.is_synced === 1 ? '☁️ Cloud OK' : '⚠️ Offline'}
                       </Text>
-
-                      {/* 📄 NEW: PRINT RECEIPT BUTTON */}
-                      <TouchableOpacity 
-                        style={styles.printRowBtn} 
-                        onPress={() => {
-                          // 1. Query items for this specific order from SQLite
-                          // eslint-disable-next-line @typescript-eslint/no-require-imports
-                          const { db } = require('../database/db');
-                          const items = db.getAllSync('SELECT * FROM local_order_items WHERE order_uuid = ?;', [order.uuid]);
-                          
-                          // 2. Generate ESC/POS layout payloads
-                          // eslint-disable-next-line @typescript-eslint/no-require-imports
-                          const { generateReceiptPayload } = require('../utils/printer');
-                          const { textMock, bytes } = generateReceiptPayload(order, items);
-
-                          // 3. Display receipt layout inside your console
-                          console.log('\n\n--- 📄 SIMULATED THERMAL PRINTER (80mm) ---');
-                          console.log(textMock);
-                          console.log('--- ⚡ HARDWARE COMMANDS EXECUTED ---');
-                          console.log(`[Drawer Kick Command Sent (RJ11 Pin 2)]: ${bytes.includes(0x70) ? 'SUCCESS' : 'FAILED'}`);
-                          console.log(`[Auto-Paper Cut Executed (GS V)]: ${bytes.includes(0x56) ? 'SUCCESS' : 'FAILED'}`);
-                          console.log('-------------------------------------------\n\n');
-
-                          showFeedback('Receipt Printed', `Simulated receipt layout printed to console.`);
-                        }}
-                      >
-                        <Text style={styles.printRowBtnText}>Imprimer</Text>
-                      </TouchableOpacity>
 
                       {order.total_incl_vat > 0 && (
                         <TouchableOpacity 
@@ -549,7 +487,7 @@ const styles = StyleSheet.create({
   mainContainer: {
     flex: 1,
     backgroundColor: '#1a202c', 
-    
+    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
   },
   center: {
     flex: 1,
@@ -857,18 +795,6 @@ const styles = StyleSheet.create({
     color: '#dd6b20',
     fontWeight: '600',
     marginRight: 10,
-  },
-  printRowBtn: {
-    backgroundColor: '#3182ce',
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-    borderRadius: 5,
-    marginRight: 8,
-  },
-  printRowBtnText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
   },
   refundRowBtn: {
     backgroundColor: '#e53e3e',

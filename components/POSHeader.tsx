@@ -10,10 +10,11 @@ interface HeaderProps {
   syncingOrders: boolean;
   onSync: () => void;
   onSignOut: () => void;
+  onCloseDay: () => void; // 🚀 NEW: Close Day trigger prop
 }
 
 const { width } = Dimensions.get('window');
-const isTablet = width > 768; // Detects if the device is an iPad/Tablet
+const isTablet = width > 768;
 
 export default function POSHeader({
   profile,
@@ -23,13 +24,13 @@ export default function POSHeader({
   syncingOrders,
   onSync,
   onSignOut,
+  onCloseDay, // 🚀 NEW
 }: HeaderProps) {
   return (
     <View style={styles.header}>
       
       {/* Left Column: Toggles & Title */}
       <View style={styles.headerLeft}>
-        {/* Hide brand logo on small screens to save space */}
         {isTablet && <Text style={styles.headerTitle}>🍔 Burger Palace</Text>}
         
         <TouchableOpacity 
@@ -51,12 +52,16 @@ export default function POSHeader({
         </TouchableOpacity>
       </View>
 
-      {/* Right Column: Cashier & Sync/Logout */}
+      {/* Right Column: Actions & Sync/Logout */}
       {profile && (
         <View style={styles.headerProfile}>
-          {/* Hide Cashier name on small mobile devices to prevent cutoff */}
           {isTablet && <Text style={styles.cashierText}>👤 {profile.name.split(' ')[0]}</Text>}
           
+          {/* 🚀 NEW: CLOSE DAY BUTTON */}
+          <TouchableOpacity onPress={onCloseDay} style={styles.closeDayButton}>
+            <Text style={styles.closeDayText}>🔒 Close Day</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity 
             style={styles.syncIconButton} 
             onPress={onSync} 
@@ -124,6 +129,18 @@ const styles = StyleSheet.create({
     marginRight: 10,
     fontWeight: '500',
     fontSize: 14,
+  },
+  closeDayButton: {
+    backgroundColor: '#e53e3e',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    marginRight: 10,
+  },
+  closeDayText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
   },
   syncIconButton: {
     backgroundColor: '#fff',
