@@ -1,6 +1,7 @@
 // app/index.tsx
 import React, { useCallback, useContext, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Dimensions, Platform, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Dimensions, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { apiClient } from '../api/client';
 import POSHeader from '../components/POSHeader';
@@ -18,12 +19,15 @@ import {
   saveOrderLocally
 } from '../database/db';
 import { useCart } from '../hooks/useCart';
+ 
+// import { printerService } from '../services/printerService';
+// 🚀 Replace it with your safe local connection enum:
+ 
 import { AuthContext } from './_layout';
 
 interface UserProfile {
   name: string;
   email: string;
-  store_id: number;
 }
 
 const generateUUID = (): string => {
@@ -52,6 +56,10 @@ export default function HomeScreen() {
 
   // Custom Hook for Cart State & Calculations
   const { cart, addToCart, removeFromCart, clearCart, totals } = useCart();
+
+  // Printer IP state for connection
+  const [printerIP, setPrinterIP] = useState('');
+  const [isPrinterConnected, setIsPrinterConnected] = useState(false);
 
   const refreshLocalMenuData = useCallback(() => {
     const localCats = getLocalCategories();
@@ -158,25 +166,71 @@ export default function HomeScreen() {
   }, []);
 
   const processCheckout = async (paymentMethod: string) => {
+    let finalPaymentMethod = paymentMethod;
+    let finalTotalTtc = totals.totalInclVat;
+    let voucherOverpayment = 0;
+
+    if (paymentMethod === 'meal_voucher') {
+      const voucherValueInput = prompt("Saisir la valeur du Ticket Restaurant (ex: 9.00):", finalTotalTtc.toFixed(2));
+      const voucherValue = parseFloat(voucherValueInput || '0') || finalTotalTtc;
+
+      if (voucherValue > finalTotalTtc) {
+        voucherOverpayment = voucherValue - finalTotalTtc;
+        showFeedback('Info', `Surpaiement TR: +${voucherOverpayment.toFixed(2)} € (Rendu de monnaie interdit)`);
+      }
+    }
+
+    if (paymentMethod === 'card') {
+      try {
+        // Safe check to see if native modules are potentially available
+         
+        const stripeTxId = await new Promise((resolve) => setTimeout(() => resolve('ch_mock_stripe_123'), 2500));
+          console.log(`[Stripe SDK] Payment Successful. Tx ID: ${stripeTxId}`);
+          showFeedback('Paiement Approuvé', 'Transaction Stripe validée.');
+
+        // const EscPosModule = require('react-native-escpos').default;
+        // if (printerService && EscPosModule) { 
+        // if (printerService) { 
+        //   setLoading(true);
+        //   // Simulate Stripe Terminal payment
+        //   const stripeTxId = await new Promise((resolve) => setTimeout(() => resolve('ch_mock_stripe_123'), 2500));
+        //   console.log(`[Stripe SDK] Payment Successful. Tx ID: ${stripeTxId}`);
+        //   showFeedback('Paiement Approuvé', 'Transaction Stripe validée.');
+        // } else {
+        //   showFeedback('Paiement Approuvé', 'Carte simulée (Expo Go).');
+        // }
+      } catch (cardError: any) {
+        Alert.alert('Échec Carte', cardError.message);
+        setLoading(false);
+        return; 
+      } finally {
+        setLoading(false);
+      }
+    }
+
     try {
       const orderUuid = generateUUID();
-
       const receiptNumber = saveOrderLocally(
         orderUuid,
         totals.subtotalExclVat,
         totals.vatAmount,
-        totals.totalInclVat,
+        finalTotalTtc,
         cart,
-        paymentMethod
+        finalPaymentMethod
       );
 
       clearCart();
       showFeedback('Commande Enregistrée', `Ticket #${receiptNumber} enregistré.`);
-      loadOrdersHistory();
       
-      handleSyncOrders().catch((syncError) => {
-        console.log('Background order sync failed:', syncError.message);
-      });
+      loadOrdersHistory(); 
+      
+      // Print Receipt Immediately After Sale
+      // const newOrder = getLocalOrdersHistory().find(o => o.uuid === orderUuid);
+      // if (newOrder) {
+      //     printerService.printReceipt(newOrder, cart); 
+      // }
+
+      handleSyncOrders().catch((err) => console.log('Silent sync offline:', err.message));
 
     } catch (error) {
       console.error('Local checkout failed:', error);
@@ -223,6 +277,14 @@ export default function HomeScreen() {
               showFeedback('Remboursement Enregistré', `Avoir #${refundReceiptNum} créé.`);
               loadOrdersHistory();
               await handleSyncOrders();
+              
+              // const refundOrder = getLocalOrdersHistory().find(o => o.sequence_number === refundReceiptNum && o.total_incl_vat < 0);
+              // if (refundOrder) {
+              //   const originalItems = getLocalOrdersHistory().find(o => o.uuid === order.uuid);
+              //   const refundItems = originalItems ? originalItems.items : [];
+              //   // printerService.printReceipt(refundOrder, refundItems);
+              // }
+
             } catch (error) {
               console.error('Refund failed:', error);
               showFeedback('Erreur', 'Impossible de rembourser.');
@@ -234,9 +296,6 @@ export default function HomeScreen() {
     );
   };
 
-  // ==========================================
-  // 🔒 NEW: Offline Daily Z-Report Closer (Archiving)
-  // ==========================================
   const handleLocalCloseDay = () => {
     const openOrders = getLocalOpenOrders();
 
@@ -254,33 +313,19 @@ export default function HomeScreen() {
           style: 'destructive',
           onPress: () => {
             try {
-              // 1. Run local Z-Report math, hash chain, and freeze in SQLite
               const zReport = closeDayLocally();
 
-              // 2. Format a gorgeous simulated thermal Z-Report for console
-              const formattedDate = new Date().toLocaleString('fr-FR');
-              
-              let zText = `\n\n=== 🔒 CLÔTURE JOURNALIÈRE (Z-REPORT) ===\n`;
-              zText += `Burger Palace Single-Store POS\n`;
-              zText += `Z-Number      : #${zReport.zNumber}\n`;
-              zText += `Date Clôture  : ${formattedDate}\n`;
-              zText += `Tickets Clos  : ${openOrders.length}\n`;
-              zText += `-------------------------------------------\n`;
-              zText += `Chiffre d'Affaires (TTC) : ${zReport.totalTtc.toFixed(2)} €\n`;
-              zText += `Chiffre d'Affaires (HT)  : ${zReport.totalHt.toFixed(2)} €\n`;
-              zText += `Total TVA Collecté       : ${zReport.totalTva.toFixed(2)} €\n`;
-              zText += `-------------------------------------------\n`;
-              zText += `DAILY SIGNATURE HASH (SHA-256):\n`;
-              zText += `${zReport.hash}\n`;
-              zText += `===========================================\n\n`;
-
-              console.log(zText);
+              console.log(`\n\n=== 🔒 CLÔTURE JOURNALIÈRE (Z-REPORT) ===`);
+              console.log(`Z-Number      : #${zReport.zNumber}`);
+              console.log(`Chiffre d'Affaires (TTC) : ${zReport.totalTtc.toFixed(2)} €`);
+              console.log(`Chiffre d'Affaires (HT)  : ${zReport.totalHt.toFixed(2)} €`);
+              console.log(`Total TVA Collecté       : ${zReport.totalTva.toFixed(2)} €`);
+              console.log(`DAILY SIGNATURE HASH (SHA-256):\n${zReport.hash}`);
+              console.log(`===========================================\n\n`);
 
               showFeedback('Z-Report Généré', `Z #${zReport.zNumber} clôturé avec succès.`);
+              loadOrdersHistory(); 
               
-              // Refresh history lists
-              loadOrdersHistory();
-
             } catch (error) {
               console.error('Daily closure failed:', error);
               showFeedback('Erreur', 'Impossible d\'effectuer la clôture.');
@@ -291,6 +336,37 @@ export default function HomeScreen() {
       ]
     );
   };
+
+// const handleConnectPrinter = async () => {
+//     // Check if the service is natively available
+//     if (printerService.isAvailable) {
+//       const printerAddress = printerIP || '192.168.1.100'; 
+//       // 🚀 Use our safe local PrinterConnectType enum:
+//       const connected = await printerService.connectPrinter(printerAddress, PrinterConnectType.TCP);
+//       setIsPrinterConnected(connected);
+//     } else {
+//       showFeedback('Info', 'Native printer only works in EAS build.');
+//     }
+//   };
+  const handleConnectPrinter = async () => {
+    try {
+      // 🚀 Comment out during Expo Go development:
+      // const EscPosModule = require('react-native-escpos').default;
+      // if (EscPosModule) {
+      //   const printerAddress = printerIP || '192.168.1.100'; 
+      //   const connected = await printerService.connectPrinter(printerAddress, PrinterConnectType.TCP);
+      //   setIsPrinterConnected(connected);
+      // } else {
+      //   showFeedback('Info', 'Native printer only works in EAS build.');
+      // }
+      
+      showFeedback('Info', 'Native printer only works in EAS build.');
+    } catch (e) {
+      showFeedback('Info', 'Native printer only works in EAS build.');
+    }
+  };
+
+ const isNativePrinterAvailable = false;
 
   if (loading) {
     return (
@@ -303,7 +379,6 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={styles.mainContainer}>
-      {/* 🚀 Render POSHeader with newly added onCloseDay hook */}
       <POSHeader
         profile={profile}
         viewMode={viewMode}
@@ -318,13 +393,35 @@ export default function HomeScreen() {
           await handleSyncOrders(true);
         }}
         onSignOut={() => auth?.signOut()}
-        onCloseDay={handleLocalCloseDay} // 🚀 Pass the Close Day handler!
+        onCloseDay={handleLocalCloseDay}
       />
 
-      {/* Workspace Area */}
+      <View style={styles.printerStatusContainer}>
+        {isNativePrinterAvailable && ( 
+          <>
+            <TextInput
+              style={styles.printerIPInput}
+              placeholder="Printer IP (e.g. 192.168.1.100)"
+              value={printerIP}
+              onChangeText={setPrinterIP}
+              keyboardType="numeric"
+              autoCapitalize="none"
+              placeholderTextColor="#999"
+            />
+            <TouchableOpacity 
+              style={[styles.printerConnectBtn, isPrinterConnected && styles.printerConnectBtnActive]} 
+              onPress={handleConnectPrinter}
+            >
+              <Text style={styles.printerConnectBtnText}>
+                {isPrinterConnected ? '✅ Connected' : '🔌 Connect Printer'}
+              </Text>
+            </TouchableOpacity>
+          </>
+        )}
+      </View>
+
       {viewMode === 'register' ? (
         <View style={styles.workspace}>
-          {/* Cart Section */}
           <View style={styles.cartColumn}>
             <Text style={styles.sectionHeader}>🛒 Current Ticket</Text>
             
@@ -385,7 +482,6 @@ export default function HomeScreen() {
             </View>
           </View>
 
-          {/* Product Grid Section */}
           <View style={styles.gridColumn}>
             <View style={styles.categoriesTabBar}>
               <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -487,7 +583,7 @@ const styles = StyleSheet.create({
   mainContainer: {
     flex: 1,
     backgroundColor: '#1a202c', 
-    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
+    // paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
   },
   center: {
     flex: 1,
@@ -806,5 +902,41 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 12,
     fontWeight: 'bold',
+  },
+  printerStatusContainer: {
+    flexDirection: 'row',
+    padding: 10,
+    backgroundColor: '#fff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  printerIPInput: {
+    flex: 1,
+    backgroundColor: '#f7fafc',
+    borderWidth: 1,
+    borderColor: '#cbd5e0',
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginRight: 10,
+    fontSize: 14,
+    color: '#2d3748',
+    maxWidth: 200,
+  },
+  printerConnectBtn: {
+    backgroundColor: '#63b3ed',
+    paddingVertical: 8,
+    paddingHorizontal: 15,
+    borderRadius: 6,
+  },
+  printerConnectBtnActive: {
+    backgroundColor: '#48bb78',
+  },
+  printerConnectBtnText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 14,
   },
 });

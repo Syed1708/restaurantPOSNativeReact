@@ -6,6 +6,7 @@ import Login from '../components/Login';
 import { showFeedback } from '../components/toastHelper';
 import { initLocalDatabase } from '../database/db';
 
+
 // Create a Context to share authentication actions across screens
 export const AuthContext = createContext<{
   signOut: () => Promise<void>;
@@ -35,6 +36,10 @@ export default function RootLayout() {
   useEffect(() => {
     initLocalDatabase();
     setIsDbReady(true);
+
+    // 🚀 Initialize Stripe SDK silently (handles Expo Go bypass automatically)
+    // initializeStripeTerminalSDK(); 
+    
     checkToken();
   }, []);
 
